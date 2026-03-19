@@ -1,0 +1,8 @@
+{
+  "prompt": "registrer betaling kunde: Nordisk Demo AS faktura 10042 2500 kr betalingsdato: 2026-03-20",
+  "files": [],
+  "tripletex_credentials": {
+    "base_url": "https://api.tripletex.io/v2",
+    "session_token": "PASTE_SANDBOX_SESSION_TOKEN"
+  }
+}

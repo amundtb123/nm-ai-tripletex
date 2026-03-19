@@ -1,0 +1,8 @@
+{
+  "prompt": "opprett faktura kunde: Nordisk Demo AS produkt Konsul time 2500 kr",
+  "files": [],
+  "tripletex_credentials": {
+    "base_url": "https://api.tripletex.io/v2",
+    "session_token": "PASTE_SANDBOX_SESSION_TOKEN"
+  }
+}

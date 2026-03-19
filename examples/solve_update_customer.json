@@ -1,0 +1,8 @@
+{
+  "prompt": "oppdater kunde Nordisk Demo AS e-post: ny@nordiskdemo.example",
+  "files": [],
+  "tripletex_credentials": {
+    "base_url": "https://api.tripletex.io/v2",
+    "session_token": "PASTE_SANDBOX_SESSION_TOKEN"
+  }
+}
