@@ -143,6 +143,8 @@ def solve(body: SolveRequestBody) -> dict[str, str]:
             request_id=rid,
             detected_intent=plan.detected_intent,
             workflow=plan.workflow,
+            workflow_route=plan.workflow_route,
+            workflow_route_detail=plan.workflow_route_detail,
             target_entity=plan.target_entity,
             has_customer_name=bool(plan.customer_name),
             has_entity_name=bool(plan.name),

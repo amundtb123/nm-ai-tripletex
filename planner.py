@@ -266,6 +266,30 @@ def _extract_product_code(text: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+# After strict substring triggers: natural-language prompts may separate verb and entity
+# (e.g. "list all employees …") so "list employees" never matches as one contiguous substring.
+_LIST_EMPLOYEES_ENTITY_RE = re.compile(
+    r"\b(employees?|ansatte|medarbeider(?:e)?)\b",
+    re.IGNORECASE,
+)
+_LIST_EMPLOYEES_VERB_RE = re.compile(
+    r"\b(list|find|show|get|display|retrieve|fetch|vis|finn|hent)\b",
+    re.IGNORECASE,
+)
+
+
+def _list_employees_fallback_tokens(prompt: str) -> tuple[str, str] | None:
+    """
+    Word-boundary verb + employee-entity match (non-adjacent OK).
+    Returns (verb_token, entity_token) lowercased for logging, or None.
+    """
+    em = _LIST_EMPLOYEES_ENTITY_RE.search(prompt)
+    vm = _LIST_EMPLOYEES_VERB_RE.search(prompt)
+    if not em or not vm:
+        return None
+    return (vm.group(1).lower(), em.group(1).lower())
+
+
 def _strip_product_metadata(tail: str) -> str:
     """Remove common inline price / code fragments to keep a cleaner display name."""
     s = tail
@@ -284,7 +308,15 @@ def _strip_product_metadata(tail: str) -> str:
     return _clean_tail(s)
 
 
-def _select_workflow(prompt: str) -> tuple[WorkflowKind, str]:
+def _select_workflow(
+    prompt: str,
+) -> tuple[WorkflowKind, str, str | None, str]:
+    """
+    Returns (workflow, tail, route_kind, route_detail).
+
+    route_kind: \"exact\" (substring trigger), \"fallback\" (list_employees word-based), or None (noop).
+    route_detail: matched trigger phrase (exact) or \"verb=…|entity=…\" (fallback); empty for noop.
+    """
     lower = prompt.lower()
     for kind, triggers in _WORKFLOW_RULES:
         for trig in triggers:
@@ -292,8 +324,12 @@ def _select_workflow(prompt: str) -> tuple[WorkflowKind, str]:
             if pos < 0:
                 continue
             tail = prompt[pos + len(trig) :].strip()
-            return kind, tail
-    return "noop", ""
+            return kind, tail, "exact", trig[:120]
+    toks = _list_employees_fallback_tokens(prompt)
+    if toks:
+        verb, ent = toks
+        return "list_employees", "", "fallback", f"verb={verb}|entity={ent}"
+    return "noop", "", None, ""
 
 
 class Plan(BaseModel):
@@ -314,6 +350,8 @@ class Plan(BaseModel):
     payment_date: str = ""
     notes: str = ""
     hints: list[str] = Field(default_factory=list)
+    workflow_route: Optional[Literal["exact", "fallback"]] = None
+    workflow_route_detail: str = ""
 
 
 def build_plan(prompt: str) -> Plan:
@@ -323,7 +361,7 @@ def build_plan(prompt: str) -> Plan:
     TODO: LLM / robust parsing when competition tasks require it.
     """
     intent = _classify_intent(prompt)
-    wf, tail = _select_workflow(prompt)
+    wf, tail, route_kind, route_detail = _select_workflow(prompt)
     target = _WORKFLOW_TARGET[wf]
 
     email = _extract_email(prompt)
@@ -410,6 +448,10 @@ def build_plan(prompt: str) -> Plan:
         f"workflow={wf!r}",
         f"normalized_snippet={snippet!r}",
     ]
+    if route_kind:
+        hints.append(f"workflow_route={route_kind}")
+        if route_detail:
+            hints.append(f"workflow_route_detail={route_detail}")
     return Plan(
         raw_prompt=prompt,
         detected_intent=intent,
@@ -428,4 +470,6 @@ def build_plan(prompt: str) -> Plan:
         payment_date=payment_date,
         notes=notes,
         hints=hints,
+        workflow_route=route_kind if route_kind in ("exact", "fallback") else None,
+        workflow_route_detail=route_detail,
     )
