@@ -96,6 +96,24 @@ def _split_invoice_tail_customer_product(tail: str) -> tuple[str, str]:
     return _clean_tail(t), ""
 
 
+def _trim_customer_name_at_product_boundary(name: str) -> str:
+    """
+    ``kunde:`` bruker ``[^\\n,]+``; uten komma kan hele halen (inkl. «produkt …») bli med.
+    Klipp før første tydelige «produkt» / «vare» / «product»-ledd.
+    """
+    s = name.strip()
+    if not s:
+        return s
+    m = re.search(
+        r"\s+\b(?:produkt|vare|product)\b(?:\s*[;\s]|:\s*|\s+)",
+        s,
+        re.IGNORECASE,
+    )
+    if m:
+        return _clean_tail(s[: m.start()])
+    return s
+
+
 def _extract_invoice_number_for_payment(text: str) -> str:
     m = re.search(
         r"(?:faktura|invoice)\s*(?:nr|no|nummer)?\s*[:#]?\s*(\d{3,})",
@@ -354,6 +372,7 @@ def build_plan(prompt: str) -> Plan:
             customer_name = labeled_cust.strip()
         else:
             customer_name = _strip_email_phone_chunks(cust_part) or _clean_tail(cust_part)
+        customer_name = _trim_customer_name_at_product_boundary(customer_name)
         labeled_prod = _extract_label_value(prompt, "produkt", "vare", "product", "linje")
         if labeled_prod:
             raw_pname = labeled_prod

@@ -63,7 +63,8 @@ def solve(body: SolveRequestBody) -> dict[str, str]:
 
     Structured lifecycle logs (stdout JSON, no secrets): ``request_received`` →
     ``files_decoded`` → ``plan_built`` → ``workflow_started`` → (``tripletex_http`` per call) →
-    ``workflow_finished`` or ``workflow_failed`` → ``request_finished``.
+    ``workflow_finished`` or ``workflow_failed`` (``failure_kind`` may be ``tripletex`` or
+    ``tripletex_configuration`` for Tripletex tenant/setup errors) → ``request_finished``.
     Session tokens and Authorization headers are never logged (see ``tripletex_request``).
     """
     rid = uuid.uuid4().hex[:12]
@@ -216,12 +217,17 @@ def solve(body: SolveRequestBody) -> dict[str, str]:
             )
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except TripletexAPIError as exc:
+            tripletex_failure_kind = (
+                "tripletex_configuration"
+                if exc.is_tenant_configuration_error()
+                else "tripletex"
+            )
             log_structured(
                 logger,
                 logging.ERROR,
                 "workflow_failed",
                 request_id=rid,
-                failure_kind="tripletex",
+                failure_kind=tripletex_failure_kind,
                 tripletex_http_status=exc.http_status,
                 api_code=exc.code,
                 message=exc.api_message,

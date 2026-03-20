@@ -208,3 +208,6 @@ __marimo__/
 
 # Local-only payloads with real sandbox credentials (never commit)
 examples/local.*.json
+.verify_green.log
+.score_mode_verify.log
+.score_mode_results.json

@@ -26,9 +26,10 @@ Deliver a **small, deployable FastAPI service** for the competition that:
 | **`schemas.py`** | Pydantic models for `/solve` body (`SolveRequestBody`, credentials, file items). |
 | **`file_parser.py`** | Decode base64 uploads under `/tmp/uploads` (or `AI_AGENT_UPLOAD_ROOT`), batch dirs, basic path safety. |
 | **`planner.py`** | Rule-based **workflow choice** (first matching trigger wins) og **light slot extraction** (`customer_name`, `name`, produkt-felt, **`invoice_autocreate_product`**, **`payment_invoice_number`** / **`payment_amount`** / **`payment_date`**, `email`, `phone`, `notes`, `target_entity`, `hints`). `Plan` bruker **`Optional[float]`** (ikke `float \| None`) for Pydantic på **Python 3.9**. |
-| **`workflows.py`** | One function per workflow; Tripletex calls via `tripletex_json`; raises `WorkflowInputError` when input is incomplete. Includes `build_customer_update_payload` for safe customer PUT. |
-| **`customer_resolver.py`** | `search_customer_by_name`, `pick_best_customer_match`, `resolve_customer_by_name` (exact name → substring heuristic → first row + log `customer_resolver_ambiguous`). |
+| **`workflows.py`** | One function per workflow; Tripletex calls via `tripletex_json`; raises `WorkflowInputError` when input is incomplete. Includes `build_customer_update_payload` for safe customer PUT. **`workflow_create_customer`:** logger **`create_customer_reuse_rejected`** (tvetydig), **`create_customer_create_chosen`** (før **POST**). |
+| **`customer_resolver.py`** | `search_customer_by_name`, **`search_customer_by_name_with_meta`** (**GET /customer**): kandidatrader utledes via **`tripletex_list`** ( **`tripletex_list_rows_from_response`** ). **`filter_exact_planned_name_matches`** / **`find_exact_customer_matches_for_create`** (**`create_customer`** + precheck‑logging inkl. **`list_payload_extract`**). **Faktura:** `resolve_customer_for_invoice` + `pick_best_customer_match_for_invoice` (fallback **`customerName`**, rangering, **`customer_resolver_invoice_*`**, **400** ved tvetydig). |
 | **`product_resolver.py`** | `search_products`, `search_products_fallback`, `resolve_product_by_name_or_number`, `pick_best_product_match` for `GET /product`; `product_resolver_ambiguous` when multiple rows and heuristics fall back to first. |
+| **`tripletex_list.py`** | **`tripletex_list_rows_from_response`**: felles utpakking når **`value`** er liste eller **`{ fullResultSize, values }`** — brukes av **kunde**-, **produkt**- og **`list_employees`**-flyter (**§17**). |
 | **`tripletex_client.py`** | Thin `requests` session with Basic auth; `get` / `post` (optional query `params`) / **`put` (optional `params`)** / `delete`. |
 | **`tripletex_request.py`** | `tripletex_json`: executes request, logs **`tripletex_http`** (inkl. `request_id` når satt, method, path, status, param keys, body keys, avkortet response preview) — **never logs session token**. |
 | **`tripletex_errors.py`** | Parse Tripletex `ApiError` JSON → `TripletexAPIError` with `public_detail()` for API responses. |
@@ -65,7 +66,7 @@ Deliver a **small, deployable FastAPI service** for the competition that:
 | `update_customer` | `update customer`, `oppdater kunde`, … | `GET /customer/{id}` → `build_customer_update_payload` → `PUT /customer/{id}` (kun `id`, `version`, og felt som faktisk endres) |
 | `search_product` **(implemented)** | `search product`, `finn produkt`, `søk produkt`, `liste produkter`, … | `GET /product` med `name` og/eller `productNumber`; **fallback** ved 0 treff (begge → nummer → navn); match-count; **`pick_best_product_match`** for tvetydig-logg (`product_resolver_ambiguous`) |
 | `create_product` | `create product`, `opprett produkt`, `nytt produkt` | `POST /product`: `name`; **`number`** fra planner (parsed varenummer) **eller** generert suffiks; valgfri **`priceExcludingVatCurrency`** når pris er parsert (`… kr` / `… nok`) |
-| `create_customer` | `create customer`, `opprett kunde`, … | `POST /customer` |
+| `create_customer` | `create customer`, `opprett kunde`, … | **Search-before-create:** `GET /customer` (planlagt navn) → ved **0** eksakt normaliserte treff: **`POST /customer`**; ved **1** treff: **gjenbruk** eksisterende id (logger **`create_customer_existing_match_*`**); ved **>1** eksakt treff: **400** tvetydig |
 | `noop` | (no trigger matched) | No API call; still returns `completed` if no error |
 
 ### `register_payment` — oppsummering (vedlikehold)
@@ -93,7 +94,7 @@ Deliver a **small, deployable FastAPI service** for the competition that:
 - **Errors:** Non-2xx responses parsed when body matches `ApiError`; surfaced as `TripletexAPIError` → HTTP 502 with `public_detail()`.
 - **Logging:** Each call logs one JSON line with `event: tripletex_http`; query **keys** logged, not sensitive values; **never** log `session_token`.
 - **`POST /invoice`:** Query `sendToCustomer=false` (string `"false"` in query params as implemented) to avoid auto-send; verify in target environment if behavior differs.
-- **Customer resolution:** Name-based search + heuristic “best” row; **no** kundenummer/orgnr parsing yet in resolver.
+- **Customer resolution:** Navnebasert **`GET /customer`** + heuristikk. **`create_invoice_for_customer`** bruker **`resolve_customer_for_invoice`** (ikke `resolve_customer_by_name`): ved **0 treff** på fullt navn forsøkes **tokens** (lengste ord først) som **`customerName`**; blant treff velges **beste** etter normalisert **eksakt** / **prefiks** / **delstreng**; **flere like scorer** med **forskjellige** visningsnavn → **400** med tydelig norsk tekst. Øvrige workflows uendret (**`pick_best_customer_match`**). Ingen orgnr/kundenummer ennå.
 - **`search_product` (implemented):** `GET /product` via **`product_resolver`**. **Produktoppløsning / fallback** (samme som i faktura): når både navn og varenummer er satt → søk med **begge**; ved **0 treff** → **kun `productNumber`**; deretter **kun `name`** (`search_products_fallback` / `workflow_search_product`).
 - **`create_invoice_for_customer` — produktstøttet linje (implemented):**
   - Ordrelinje kan inkludere **`product: { id }`** når planner har `product_name` og/eller `product_number` (etiketter eller svak «produkt»/«vare»-split i halen).
@@ -120,6 +121,20 @@ Deliver a **small, deployable FastAPI service** for the competition that:
 9. **`create_invoice_for_customer`** kan sette **`product: { id }`** på ordrelinjen når planner har `product_name` / `product_number` (fra etiketter `kunde:`/`produkt:` eller svak splitting på «produkt»/«vare» i halen). Mangler produktet og brukeren **har** ikke bedt om «opprett produkt hvis mangler» → **400**. Beløp: **prompt `… kr` > `product_price` > katalog `priceExcludingVatCurrency` >** `TRIPLETEX_INVOICE_LINE_AMOUNT`.
 10. **`register_payment`** krever **TRIPLETEX_DEFAULT_PAYMENT_TYPE_ID** og **beløp** i klienten; **ingen gjetting** av konto, KID eller delbetalinger. **Flere** fakturaer med samme synlige nummer → **400** med oppfordring til `kunde:`. Faktura må finnes i **`GET /invoice`**-resultatet (OpenAPI: «charged outgoing» — **usikkerhet** for kreditert/eldre linjer).
 11. **Lokal sandbox-test:** Ved feil **`base_url`** (feil vert, mangler **`/v2`**, `http` i stedet for `https`) og/eller ugyldig / plassholder-**`session_token`** kan Tripletex eller et mellomled returnere **XML `AccessDenied`** (eller annet ikke-JSON) i stedet for normal **`ApiError`**-JSON. Dette er ofte **konfigurasjon**, ikke workflow-logikk. Appen avviser nå åpenbare plassholdere og URL-feil med **400** (`workflow_failed` med **`failure_kind`**: **`credential_config`**) før HTTP-kall — se **§14**.
+12. **`list_employees` mot NM-sandbox (bekreftet):** Lokal **ende-til-ende**-kjøring er **verifisert** for denne flyten (**HTTP Basic** + korrekt **`base_url`**, planner-routing, og **Tripletex**-tilkobling). Logger viste **`workflow` = `list_employees`**, **`tripletex_http`** for **GET `/employee`** med **HTTP 200**, og **`request_finished`** med **HTTP 200**. **Oppfølging (liten observabilitetssak, ikke blokker):** **`workflow_finished`** logget **`employee_count`** som **`"0"`** selv om **`response_preview`** på **`tripletex_http`** indikerte minst én ansatt — tolkes som mulig avvik i **utpakking/telling** av responsstruktur, ikke som tegn på feil nettverkskall.
+13. **`create_customer` mot NM-sandbox (historisk bekreftet + duplikater):** Gjentatte lokale sandbox-testkjøringer med samme visningsnavn (**f.eks. «Acme AS»**) har skapt **flere** kunderader — **kjent test-artefakt**. **`create_customer`** gjør nå **forhåndssøk** og **gjenbruk** ved **eksakt** normalisert treff før **`POST /customer`** (**§5** punkt 18). Tidligere ble flyten verifisert med **HTTP 201** på **POST** når kunden var ny.
+14. **`create_product` mot NM-sandbox (bekreftet):** **`create_product`** er **ende-til-ende verifisert** mot sandbox. Logger bekreftet **`workflow` = `create_product`**, **`tripletex_http`** for **`POST /product`** med **HTTP 201**, **`request_finished`** **`http_status` 200**, og **`POST /solve`** **HTTP 200** + **`{"status":"completed"}`**. **Praktisk observasjon (ikke blokker):** Prompten *«opprett produkt Kaffe varenummer 1001 pris 59 kr»* ga et opprettet produkt der **navnet tilsynelatende fortsatt inneholdt teksten «varenummer 1001»** (ikke et rent *«Kaffe»*-navn) — tyder på at **uttrekk av `product_name` vs. `product_number`** i **`planner.py`** kan **forfinnes senere**; **ikke** kritisk nå — se **§13**.
+15. **`search_product` mot NM-sandbox (bekreftet):** **`search_product`** er **ende-til-ende verifisert**. Logger bekreftet **`workflow` = `search_product`**, **`tripletex_http`** for **GET `/product`** med **HTTP 200**, **`request_finished`** **`http_status` 200**, og **`POST /solve`** **HTTP 200** + **`{"status":"completed"}`**. **Oppfølging (liten observabilitet/telling, ikke blokker):** **`workflow_finished`** logget **`product_match_count`** som **`"0"`** mens **`tripletex_http`** **`response_preview`** viste **`fullResultSize=1`** — tolkes som avvik i **telling/serialisering** i workflow-logg, ikke som feilet API-kall — se **§13**.
+16. **`create_invoice_for_customer` — lokal sandbox-øvelse (delvis):** Flyten er **kjørt** mot sandbox med tre prompt-varianter. **(a)** *«opprett faktura for kunde Acme AS produkt Kaffe»* ga **feil kundenavn** i planner: **«for kunde Acme AS»** (for naiv stripping av «kunde»-ledd). **(b)** *«opprett faktura kunde: Acme AS produkt Kaffe»* ga **«Acme AS produkt Kaffe»** som kunde — **`kunde:`**-verdien tas som **`[^\\n,]+`**, så **mangler komma** / **`produkt:`** før **produkt**-ledd skviser inn produkttekst i **`customer_name`**. **(c)** *«opprett faktura kunde: Acme AS, produkt: Kaffe 500 kr»* ga **korrekt parsing** av kunde **«Acme AS»**, men **`POST /solve`** endte i **`WorkflowInputError`** / **400** med *«Fant ingen kunde som matcher «Acme AS»»* — ekte **kundeoppslagsfeil** fra resolver/Tripletex-søk, ikke auth. **Konklusjon:** **Ruting** til **`create_invoice_for_customer`**, **sandbox auth** og **HTTP**-oppkobling fungerer; **fakturaflyt** trenger **sterkere planner** (kunde/produkt-separasjon) og/eller **bedre kundeoppløsning** mot **kjente** sandbox-navn. Lokal fil **`examples/local.solve_create_invoice_for_customer.json`** er oppdatert til **variant (c)** — se **§13**. **Oppdatert (punkt 17):** Delvis søk *«finn kunde Acme»* viser **data i sandbox** — **manglende treff** på eksakt **«Acme AS»** i faktura er da sannsynlig **resolver/adferd**, ikke **tom** leietaker.
+17. **`search_customer` — del-søk «Acme» (sandbox, oppdatert observert):** Lokal kjøring med *«finn kunde Acme»* ga **`GET /customer`** **200** med **`fullResultSize=4`** i preview, men **`customer_match_count`** **`"0"`**. **Årsak (rettet 2026-03-19):** Utdatamodellen var **`value.values`** (liste), ikke en flat liste under **`value`** — klientkoden tok ut feil nivå og fikk **tom** kandidatliste. **Etter retting** skal **`search_customer_by_name`** speile **`fullResultSize`** i antall rader (innen **`count`**).
+18. **`create_customer` — duplikatvern / search-before-create (2026-03-19):** Flyten bruker **search-before-create**: før **`POST /customer`** kjøres **`GET /customer`** med planlagt navn; rader der **`name`** / **`displayName`** matcher **eksakt** (normalisert små bokstaver + felles whitespace) telles. **0** treff → **opprett** som før; **1** treff → **returner eksisterende `customer_id`**, logger **`create_customer_existing_match_found`** og **`create_customer_existing_match_reused`**, **`workflow_finished`** inkl. **`customer_reused`**: **`true`** (ingen ny **POST**). **>1** treff med samme eksakte navn → **400** + **`create_customer_existing_match_ambiguous`**. **Begrensning:** Eksisterende kunde som **ikke** returneres av Tripletex for dette søket kan fortsatt gi nye rader; dette er **inkrementelt** vidd, ikke full deduplisering.
+    - **Mockede tester:** `tests/test_create_customer_reuse.py` (`unittest` + `unittest.mock`) dekker gjenbruksatferd: **eksakt eksisterende treff** → **gjenbruk** og **ingen** `tripletex_json`-kall for **`POST /customer`**; **ingen treff** → **opprett ny** kunde via **`POST /customer`** med **`customer_reused`**: **`false`**. **Begge** scenarier **grønn** i testkjøring.
+    - **Live-verifikasjon (Cursor/agent-miljø):** `POST /solve` med `examples/solve_create_customer.json` mot lokal Uvicorn ga **HTTP 502** med Tripletex/mellomledd **403** (HTML-feilside) — **ikke konklusiv** for om gjenbruksstien fungerte i akkurat den økta. **Lokal sandbox-verifikasjon** av reuse med gyldig token og kundenavn som allerede finnes **gjenstår**.
+    - **Lokal to-terminal test (Uvicorn + `curl`, 2026-03-19, innfanget stdout):** Samme mislykkede mønster — se **§13** *«Lokal to-terminal `create_customer` (2026-03-19)»*. Kort: **502** / upstream **403** på **`POST /customer`**, **ingen** reuse-logger, **POST** ble **ikke** unngått.
+    - **Vellykket live reuse** (forventet i stdout): **`tripletex_http`** med **GET** for kundesøk (ikke **`POST /customer`**), **`create_customer_existing_match_found`**, **`create_customer_existing_match_reused`**, **`workflow_finished`** med **`customer_reused`** = **`true`**.
+    - **Lokal sandbox (2026-03-19, observerte før fiks):** **`GET /customer`** deretter **`POST /customer`**, **`customer_reused`**: **`false`**. **Delvis forklart** av **JSON‑utpakingsfeil** ( **`api_candidate_count`** = **0** til tross for **`fullResultSize`**) — se siste understrek nedenfor. **Når utpakking er riktig:** **`false`** betyr fortsatt **`combined_exact_match_row_count`** ≠ **1** (navn/displayName matcher ikke planlagt streng etter normalisering).
+    - **Diagnostikk-logging (2026-03-19):** Ved **`create_customer`** precheck logges **`create_customer_precheck_search_result`** (`api_candidate_count`, **`list_payload_extract`** (må være **`unwrapped_object_values`** eller **`unwrapped_list`** ved normale Tripletex-svar), **`any_exact_*`**, **`combined_exact_match_row_count`**, m.m. — **ingen** hemmeligheter). Øvrige hendelser som før (**`create_customer_exact_match_found`**, **`create_customer_displayname_match_found`**, **`create_customer_reuse_rejected`**, **`create_customer_create_chosen`**).
+    - **Live lokal motsigelse funnet (2026-03-19):** **`tripletex_http`** for **`GET /customer`** viste **200** + **`fullResultSize=5`**, mens **`create_customer_precheck_search_result`** hadde **`api_candidate_count`** = **0** og **`reason`** **`no_api_rows`** — **feil**: kandidater ble ikke tatt ut av JSON (**`value.values`**). **Rettet** i **`customer_resolver._customer_rows_from_list_response`**. **`create_customer` gjenbruk** må **bekreftes på nytt** i sandbox etter fiks (forvent **`api_candidate_count`** ≈ antall rader som returnedes, og **`no_api_rows`** kun når **`fullResultSize`**/`values` faktisk er tomme).
 
 ---
 
@@ -145,25 +160,27 @@ Deliver a **small, deployable FastAPI service** for the competition that:
 - **Database** or durable job queue
 - **LLM** for intent or entity extraction (unless explicitly requested later)
 - **OAuth / token refresh** (consumer supplies session token per request)
-- **Automated test suite** / CI (recommended future addition)
+- **Full automated test suite** / CI (recommended future addition); **delvis:** mockede `unittest`-tester for **`create_customer`** gjenbruk — `tests/test_create_customer_reuse.py` (se **§5** punkt 18)
 - **Comprehensive Tripletex field coverage** (only minimal happy paths)
 
 ---
 
 ## 8. Current priority strategy
 
-1. **Etter `register_payment` (implementert):** **live-test og herde betalingsflyt** — bekreft **paymentTypeId**, valuta/`paidAmountCurrency`, og at målfaktura finnes i `GET /invoice`.
-2. **Herde faktura** — flere linjer, paginering, **MVA** / **`sendToCustomer`** / ordrelinje- og **POST /product**-felt.
-3. **Planner** (regex uten LLM): bedre betalings-/faktura-uttrekk (delbetaling, KID, flere valutaer).
-4. **Operational clarity** — hold `README.md` og denne filen oppdatert.
+1. **Pause `create_invoice_for_customer` i nåværende sandbox** til leietaker har **bankkonto** i Tripletex — ellers **502** / **`tripletex_configuration`** (se **§16**). **Ikke fjern** **`customer_resolver_invoice_*`**, faktura-**`workflow_finished`**-felt eller diagnose i logger.
+2. **Pause `register_payment`** til sandbox har minst én **synlig faktura** (`GET /invoice`) **og** **`TRIPLETEX_DEFAULT_PAYMENT_TYPE_ID`** fra Tripletex-UI (**§16**, **`TESTING.md`**). **Behold** **`register_payment_attempt`** og **PUT** `/:payment`-stien.
+3. **Herde grønne workflows:** **`list_employees`**, **`search_customer`**, **`create_customer`**, **`create_product`**, **`search_product`** — konsistent list-utpakking, tellinger vs. **`fullResultSize`**, tydelige **`workflow_finished`**-felt (**§17**).
+4. **Planner-herding** for faktura-prompts **etter** at (3) er tilfredsstillende — ikke før.
+5. **Operational clarity** — hold `README.md` og denne filen oppdatert.
 
 ---
 
 ## 9. Immediate next steps
 
-1. **Prioritet etter `register_payment`:** live-test av `PUT /invoice/{id}/:payment`; valider **GET /invoice**-synlighet; korrekt **TRIPLETEX_DEFAULT_PAYMENT_TYPE_ID**; utvid ved behov med **`paidAmountCurrency`**, delbetaling og klar feilhåndtering for lukket faktura.
-2. **Fortsett faktura-/produkt-verifikasjon:** `vatType`, **`sendToCustomer`**, **POST /product**, **GET /product** `productNumber`.
-3. **Planner:** forbedre uttrekk for betaling (KID, delbeløp) når konkurransen krever det.
+1. **Grønne workflows:** Verifiser at **`employee_count`**, **`customer_match_count`**, **`product_match_count`** matcher **`tripletex_http`**-preview / **`api_full_result_size`** der det er relevant (**§17**).
+2. **Når sandbox har bankkonto:** gjenoppta **`create_invoice_for_customer`** live (se eksisterende diagnose **§5** punkt 16, **§15–16** — **ikke slettet**).
+3. **Når sandbox har faktura + betalingstype-ID:** **`register_payment`** end-to-end (**§16**).
+4. Deretter: **planner** for faktura-prompts (**§8** punkt 4).
 
 ---
 
@@ -258,6 +275,82 @@ Deliver a **small, deployable FastAPI service** for the competition that:
 
 - **Python 3.11** forblir **anbefalt runtime** (konkurranse, dokumentasjon); **3.9** er verifisert som fungerende for import og enkel lokal test etter justeringene over.
 
+### Bekreftet NM-sandbox — `list_employees` (2026-03-19)
+
+- **Lokal sandbox-test vellykket** for workflow **`list_employees`** (prompt som trigger, ekte session token og **tenant-spesifikk** API-**`base_url`** fra sandbox).
+- **Ende-til-ende verifisert for denne flyten:** **autentisering** (Tripletex Basic med `"0"` + token), **ruting** (`plan_built` / `workflow_started` → `list_employees`), og **Tripletex-konnektivitet** (vellykket JSON-kall mot **`GET /employee`**).
+- **Logger (observert):**
+  - **`plan_built`** / **`workflow_finished`**: **`workflow`** = **`list_employees`**
+  - **`tripletex_http`**: **GET** **`/employee`**, **`status_code` 200**
+  - **`request_finished`**: **`http_status` 200** (HTTP-respons **`{"status":"completed"}`**)
+- **Oppfølgingspunkt (minor, ikke blokker):** **`workflow_finished`** felt **`employee_count`** ble logget som **`"0"`** mens **`tripletex_http`** **`response_preview`** tydet på **minst én** ansatt — en **observabilitet / respons-parsing**-detalj å undersøke ved behov, **ikke** kritisk for å anse sandbox-integrasjonen som «grønn» for dette scenariet.
+
+### Bekreftet NM-sandbox — `create_customer` (2026-03-19)
+
+- **`create_customer`** er **ende-til-ende verifisert** mot NM-sandbox for **ny** kunde (**`tripletex_http`**: **`POST`** **`/customer`**, **`status_code` 201**) og for routing (typisk prompt *«opprett kunde …»*, ekte **`base_url`** + session token).
+- **Search-before-create / gjenbruk:** Logikk og **mockede tester** (`tests/test_create_customer_reuse.py`) bekrefter reuse uten **`POST /customer`** når ett eksakt navnetreff finnes (**§5** punkt 18). **Live reuse** mot sandbox er **ikke** bekreftet fra agent-miljø (éns **`POST /solve`** ga **502** / Tripletex **403**); **lokal sandbox** med eksisterende kundenavn **må** fortsatt kjøres for full tillit.
+- **Logger — ny kunde (observert historisk):**
+  - **`plan_built`** / **`workflow_finished`**: **`workflow`** = **`create_customer`**
+  - **`tripletex_http`**: **`POST`** **`/customer`**, **`status_code` 201**
+  - **`request_finished`**: **`http_status` 200**; **`POST /solve`**-body **`{"status":"completed"}`**
+- **Logger — forventet ved vellykket live reuse:** **`tripletex_http`** med **GET** (kundesøk), **`create_customer_precheck_search_result`** med **`combined_exact_match_row_count`** **1**, **`create_customer_existing_match_found`**, **`create_customer_existing_match_reused`**, **`workflow_finished`** med **`customer_reused`** = **`true`** (ingen **`POST /customer`**).
+- **Logger — precheck uten gjenbruk (typisk `customer_reused` false):** **`tripletex_http` GET** `/customer`; **`create_customer_precheck_search_result`** (sjekk **`api_candidate_count`**, **`list_payload_extract`** (`unwrapped_object_values` / `unwrapped_list` ved OK), **`any_exact_*`**, **`combined_exact_match_row_count`**); **`create_customer_reuse_rejected`** når kombinert treff er **0**; **`create_customer_create_chosen`**; deretter **`tripletex_http` POST** `/customer`.
+- **Testdata:** Gjentatte lokale kjøringer med **Acme AS** har skapt **flere** kunder med samme visningsnavn i sandbox — forventet i test, men **øker behovet** for å verifisere **`search_customer`** (entydig vs. **flere treff** / heuristikk).
+- **Neste anbefalte lokale test:** **`search_customer`**; **og** **live** **`create_customer`** mot eksisterende kundenavn for å bekrefte reuse-logger (se **§5** punkt 18).
+
+### Lokal to-terminal `create_customer` (2026-03-19)
+
+- **Oppsett:** Én terminal **Uvicorn** (her: `127.0.0.1:8765`), én terminal **`curl`** `POST /solve` med prompt *«opprett kunde Nordisk Demo AS kontakt@nordiskdemo.example»* (samme type payload som `examples/solve_create_customer.json`).
+- **`curl`-respons:** **HTTP 502** `Bad Gateway`; responskropp **`detail`** = forkortet **HTML** (CloudFront **403** — *«The request could not be satisfied»* / melding om at **HTTP-metoden** for forespørselen **ikke er tillatt** for distribusjonen). **Ikke** `{"status":"completed"}`.
+- **Uvicorn / server-logg (samme forespørsel; ett `request_id` per kjøring, f.eks. `dba57fc0efcf`):**
+  - **`plan_built`** / **`workflow_started`:** **`workflow`** = **`create_customer`**, **`has_customer_name`**: **true**.
+  - **`tripletex_http`:** **kun én linje** i fanget logg for denne flyten: **`method`:** **`POST`**, **`path`:** **`/customer`**, **`status_code`:** **403**, **`request_body_keys`:** **`name`**, **`response_preview`:** HTML-feil (samme tema som **curl** `detail`).
+  - **`workflow_failed`:** **`failure_kind`:** **`tripletex`**, **`tripletex_http_status`:** **403**.
+  - **`request_finished`:** **`outcome`:** **`upstream_error`**, **`http_status`:** **502**.
+  - **Ikke observert:** **`workflow_finished`** med suksess, **`create_customer_existing_match_found`**, **`create_customer_existing_match_reused`**, eller **`customer_reused`**.
+- **Konklusjon for denne økta:**
+  - **Gjenbruk av eksisterende kunde:** **Nei** — flyten feilet før noe vellykket **`workflow_finished`**; reuse-hendelser **manglet**.
+  - **`POST /customer` unngått:** **Nei** — **`POST /customer`** ble **forsøkt** (logget som **`tripletex_http`**) og returnerte **403**.
+  - **`create_customer_existing_match_found` / `…_reused`:** **Nei** — **opptrådte ikke** i loggen.
+- **Diagnostikk / neste anbefalte steg:**
+  1. **Miljø:** Verifiser at **`base_url`** og **`session_token`** er **nøyaktig** det NM-/sandbox-siden viser (feil vert, utløpt token eller trafikk via feil CDN kan gi **403** HTML i stedet for Tripletex JSON).
+  2. **Prosess:** **Restart Uvicorn** etter kodeendringer — med **search-before-create** i kilden forventes normalt **`tripletex_http` GET** `/customer` **før** eventuell **`POST /customer`** når gjenbruk **ikke** skjer på første treff; i det **innfangede** loggutdraget vises **bare** **`POST`** (kompatibelt med **gammel prosess** som ikke hadde pre-**GET**, eller utelatt linje — ved tvil: restart + ny kjøring).
+  3. **Når API er grønt:** Kjør **`create_customer`** mot et kundenavn som **allerede** finnes og bekreft **GET** + **`create_customer_existing_match_*`** + **`customer_reused`:** **`true`** uten **`POST /customer`**.
+
+### NM-sandbox — `search_customer` del-treff «Acme» (oppdatert)
+
+- **`search_customer`** med prompt *«finn kunde Acme»* (bl.a. `examples/local.solve_search_customer_existing.json`): **`tripletex_http`** **GET `/customer`** returnerte **HTTP 200** med **`fullResultSize=4`** i **preview** — **kundedata finnes** og **søk/tilkobling** er **OK**.
+- **`POST /solve`:** **HTTP 200**, **`{"status":"completed"}`**.
+- **Observabilitet (minor, ikke blokker):** **`workflow_finished`** viste **`customer_match_count`** = **`"0"`** til tross for **`fullResultSize=4`** — **telle-/logg-gap** (jevnfør **`list_employees`**, **`search_product`**).
+- **Konsekvens for faktura (jf. punkt 16):** *«Fant ingen kunde … «Acme AS»»* ved **`create_invoice_for_customer`** tyder på **resolver-/oppfølgingsadferd** eller **navne-match**, ikke at sandbox **mangler** «Acme»-kunder.
+
+### Bekreftet NM-sandbox — `create_product` (2026-03-19)
+
+- **`create_product`** er **ende-til-ende verifisert** mot NM-sandbox (bl.a. prompt *«opprett produkt Kaffe varenummer 1001 pris 59 kr»*, `examples/local.solve_create_product.json`).
+- **Logger (observert):**
+  - **`plan_built`** / **`workflow_finished`**: **`workflow`** = **`create_product`**
+  - **`tripletex_http`**: **`POST`** **`/product`**, **`status_code` 201**
+  - **`request_finished`**: **`http_status` 200**; **`POST /solve`** **`{"status":"completed"}`**
+- **Praktisk observasjon (ikke blokker):** Det opprettede produktets **navn** så ut til å **inneholde «varenummer 1001»** (kombinasjon av fritekst og varenummer-ledd) fremfor et rent *«Kaffe»* — **antyder** at **navn vs. varenummer**-split i planner bør **ses på senere**; **ikke** blokkerende for videre testing.
+
+### Bekreftet NM-sandbox — `search_product` (2026-03-19)
+
+- **`search_product`** er **ende-til-ende verifisert** mot NM-sandbox (bl.a. prompt *«finn produkt Kaffe»*, `examples/local.solve_search_product.json`).
+- **Logger (observert):**
+  - **`plan_built`** / **`workflow_finished`**: **`workflow`** = **`search_product`**
+  - **`tripletex_http`**: **GET** **`/product`**, **`status_code` 200**
+  - **`request_finished`**: **`http_status` 200**; **`POST /solve`** **`{"status":"completed"}`**
+- **Oppfølgingspunkt (minor, ikke blokker):** **`workflow_finished`** hadde **`product_match_count`** = **`"0"`** mens **`response_preview`** inneholdt **`fullResultSize=1`** — **kun** et **logg-/telle**-mønster å rette opp i senere (jevnfør **`employee_count`** for **`list_employees`**, **§5** punkt 12).
+
+### Lokal sandbox — `create_invoice_for_customer` (øvelse, ikke fullført OK)
+
+- Flyten er **øvet** mot NM-sandbox (`examples/local.solve_create_invoice_for_customer.json`).
+- **Prompt variant 1:** *«opprett faktura for kunde Acme AS produkt Kaffe»* → planner satte kunde til **«for kunde Acme AS»** (for enkelt uttrekk).
+- **Prompt variant 2:** *«opprett faktura kunde: Acme AS produkt Kaffe»* → kunde ble **«Acme AS produkt Kaffe»** (**produkt**-ledd fanget i **`kunde:`**-feltet uten **komma** / **`produkt:`**-label).
+- **Prompt variant 3:** *«opprett faktura kunde: Acme AS, produkt: Kaffe 500 kr»* (**nåværende innhold i lokal payload**) → **korrekt** kunde **«Acme AS»** i plan, men **`POST /solve`** → **400** *«Fant ingen kunde som matcher «Acme AS»»* (reelt oppslag, ikke credential-feil).
+- **Lesning (historisk observert):** **Tjenesteruting** + **sandbox auth** OK; *«Fant ingen kunde … «Acme AS»»* med primærsøk pekte på **resolver** — **§15** har **etterfølgende** kodeendring (**`resolve_customer_for_invoice`**). **Innsikt:** Del-søk *«finn kunde Acme»* viste **`fullResultSize=4`** — data finnes.
+- **Re-test etter §15 (2026-03-19, samme sandbox URL/token):** `POST /solve` med *«opprett faktura kunde: Acme AS, produkt: Kaffe 500 kr»* (`local.solve_create_invoice_for_customer.json`) ga fortsatt **HTTP 400** med *«Fant ingen kunde som matcher «Acme AS»»* (dvs. **`not_found`**-gren i **`resolve_customer_for_invoice`**, ikke **tvetydig**-meldingen). **Mulige forklaringer:** (1) lokal **uvicorn**-/prosess **ikke restartet** etter kodeendring (kjører fortsatt gammel **`resolve_customer_by_name`**), og/eller (2) **`GET /customer`** i dette kallet returnerte **0 rader** både for primær og fallback-token i akkurat den økta. **Neste steg:** restart app, kjør på nytt, og i stdout se etter **`customer_resolver_invoice_fallback_search`** / **`customer_resolver_invoice_pick`** (bevis på ny sti).
+
 ---
 
 ## 14. Lokal sandbox — XML AccessDenied og credential-validering (2026-03-19)
@@ -276,6 +369,580 @@ Deliver a **small, deployable FastAPI service** for the competition that:
 
 ### Neste steg for utvikler
 
-- Lim inn **eksakt** `base_url` (HTTPS, sti **`/v2`**) og **session token** fra sandbox-siden i én `examples/solve_*.json` (se **`TESTING.md`**), kjør f.eks. **`solve_list_employees.json`**, bekreft **`tripletex_http`** med JSON-svar.
+- **Fullført mot NM-sandbox (lokalt):** **`list_employees`**, **`create_customer`**, **`search_customer`**, **`create_product`**, **`search_product`** — **§13**.
+- **`create_invoice_for_customer`:** **Kode §15** på plass; **sandbox POST /invoice** fortsatt **ikke** bekreftet grønn — siste **curl**-re-test ga fortsatt **400** kunde ikke funnet (**§13** faktura-avsnitt); **restart** tjeneste og verifiser logger.
+- **Prioritet nå:** **(1)** **Restart** app etter deploy/lokal endring, **re-run** faktura-payload + sjekk **`customer_resolver_invoice_*`** i logg, **(2)** herde **faktura-prompts** (**§9**), **(3)** **`register_payment`** (**§8**).
+- **Valgfritt:** Produktnavn vs. varenummer (**§13** `create_product`); **`employee_count`** / **`product_match_count`** / **`customer_match_count`** vs **`fullResultSize`** i preview (**§5** punkt 12, **15**, **17**).
 
-*Last updated: 2026-03-19 — **§14** sandbox AccessDenied + credential-validering; **§13** uendret innhold; **3.11** anbefalt.*
+---
+
+## 15. Latest change — `create_invoice_for_customer` kundeoppløsning (2026-03-19)
+
+### Hva som ble endret
+
+- **`customer_resolver.py`:** Nye hjelpefunksjoner + **`resolve_customer_for_invoice`** (tuple `row`, status **`ok`** / **`not_found`** / **`ambiguous`**) og **`pick_best_customer_match_for_invoice`** med **skåring** og **tie-break** (lengde). **Strukturert logging** (JSON, **ingen** hemmeligheter): bl.a. **`customer_resolver_invoice_fallback_search`**, **`customer_resolver_invoice_pick`** (`match_kind`: `exact` \| `prefix` \| `substring` \| `query_contains_name`, `resolution`, `api_candidate_count`), **`customer_resolver_invoice_ambiguous`**.
+- **`workflows.py` —** kun **`workflow_create_invoice_for_customer`:** Byttet fra **`resolve_customer_by_name`** til **`resolve_customer_for_invoice`**; ny **400**-tekst når **tvetydig**.
+
+### Atferd (kort)
+
+- Primært **`GET /customer`** med **`customerName`** = planlagt kundenavn; ved **tom liste** forsøkes **nedbrutte tokens** (lengst først, min. 2 tegn) — typisk fanger *«Acme»* når *«Acme AS»* gir **0** rader i API-et men **Acme**-treff finnes.
+- **Valg:** Eksakt normalisert treff (navn/`displayName`) slår **prefiks** → **delstreng** → svak **navn inneholdt i query**; **flere uavklarte toppkandidater** → **ambiguous** / brukerfeilmelding (ikke «første rad» stille).
+- **Live:** Skal bekreftes mot NM-sandbox med **`local.solve_create_invoice_for_customer.json`** (kunde + **`TRIPLETEX_DEFAULT_VAT_TYPE_ID`**, produkt, ol.). **Obs. re-test:** Én kjøring etter merge ga fortsatt **400** «Fant ingen kunde» — se **§13** (faktura-avsnitt) om **server restart** og logghendelser.
+
+---
+
+## 16. Dag 2 — faktura POST-felter + `register_payment`-logging (2026-03-20)
+
+### Verifisert med fersk Uvicorn + `examples/local.solve_create_invoice_for_customer.json`
+
+- **`resolve_customer_for_invoice`** kjører: logger **`customer_resolver_invoice_pick`** med `search_path` **`primary_customerName`**, `match_kind` **`exact`**, `picked_customer_id` satt. **`customer_resolver_invoice_fallback_search`** utløses **kun** når primærsøket gir **0** kandidater — for *«Acme AS»* i testmiljøet var **ikke** fallback nødvendig (primær **`GET /customer`** hadde treff).
+- **Tidligere 400 «ingen kunde»** på samme payload var **ikke** reprodusert etter fiks av **`value.values`**-utpakking og fersk prosess; feil kan i stedet være **manglende produkt** (400 «Fant ingen produkt …») hvis «Kaffe» ikke finnes og **ikke** «opprett produkt hvis mangler» er i prompten.
+
+### `POST /invoice` — obligatoriske felter (Tripletex validering)
+
+- **`invoiceDueDate`** — tidligere **422** *«invoiceDueDate … Kan ikke være null»*. Settes nå til **i dag +** **`TRIPLETEX_INVOICE_DUE_DAYS`** (standard **14**).
+- **`orders[]`:** **`customer`** og **`deliveryDate`** — **422** hvis null. Ordren får nå **`customer: { id }`** og **`deliveryDate`** = fakturadato (samme dag som `orderDate`).
+
+### Sandbox-blokkering etter gyldig payload
+
+- **502 / 422** med melding om at **faktura ikke kan opprettes før selskapet har bankkontonummer** — **miljø-/selskapsoppsett** i Tripletex, ikke applikasjonslogikk. Full grønn **POST /invoice** i denne leietakeren krever **registrert bankkonto** (evt. annen NM-sandbox med oppsett).
+
+### `register_payment`
+
+- Strukturert logglinje **`register_payment_attempt`** før **`PUT /invoice/{id}/:payment`**: `invoice_id`, `invoice_number`, `payment_type_id`, `payment_date`, `paid_amount`, `customer_id`, `invoice_search_match_count`. **`tripletex_http`** viser fortsatt **HTTP-status** og **response_preview** for selve **PUT**.
+- **`TRIPLETEX_DEFAULT_PAYMENT_TYPE_ID`:** hent **ID** fra Tripletex (selskapsinnstillinger / betalingstyper). **`GET …/v2/invoice/paymentType`** kan returnere **tom liste** avhengig av rettigheter/oppsett — i så fall **ikke** trial-and-error; bruk UI-dokumentert ID.
+- **Automatisert sjekk (2026-03-20):** `GET /invoice` med datovindu mot **NM-sandbox** (`kkpqfuj-amager…`) returnerte **0** fakturaer — **`register_payment`** kan da ikke fullføres før det finnes minst én synlig faktura (eller annet tenant med data).
+
+### Tripletex-feil som selskapsoppsett (ikke agent-feil)
+
+- Ved **422** med validering om **bankkontonummer** (og liknende): HTTP **502**-`detail` prefikses med **«Tripletex / selskapsoppsett …»**; **`workflow_failed`** bruker **`failure_kind`:** **`tripletex_configuration`** (ellers **`tripletex`**).
+
+---
+
+## 17. Tripletex list-unwrapping + `workflow_finished`-tellinger (2026-03-20)
+
+- **`tripletex_list.py`:** **`tripletex_list_rows_from_response`** — felles utpakking når **`value`** er liste **eller** **`{ fullResultSize, values }`** (samme hull som tidligere rammet **kunde**).
+- **`workflow_list_employees`:** **`employee_count`** reflekterer nå antall utpakkede rader (tidligere ofte **`"0"`** ved **`values`‑wrapper**).
+- **`product_resolver.search_products`:** samme utpakking; **`search_products`** / **`search_products_fallback`** returnerer korrekte rader (og metadata for siste forsøk).
+- **`workflow_search_customer`** / **`workflow_search_product`:** **`customer_match_count`** / **`product_match_count`** er konsistente med utpakkede lister; **`workflow_finished`** kan inkludere **`list_payload_extract`**, **`api_full_result_size`** (Tripletex `fullResultSize` når satt).
+- Når **`fullResultSize`** ≠ antall rader returnert i siden (paginering / `count`): logg **`tripletex_list_count_hint`** med `resource`, `api_full_result_size`, `rows_in_page`.
+- **`create_customer`** / **`create_product`:** ingen ekstra API-kall lagt til; **gjenbruk**-sti for kunde uendret (**én** pre-**GET** før ev. **POST**).
+
+### Verifikasjonsrunde (NM-sandbox, 2026-03-20)
+
+Kjørt sekvensielt: **`list_employees`** → **`search_customer`** («finn kunde Acme») → **`search_product`** («finn produkt Kaffe») → **`create_customer`** (unikt navn) → **`create_product`**.
+
+| Workflow | **Før** (typisk) | **Etter herding** (observert) |
+|----------|------------------|-------------------------------|
+| **`list_employees`** | `employee_count` **«0»** mens `response_preview` viste **`fullResultSize` ≥ 1** | **`employee_count`** = **`api_full_result_size`** (f.eks. **1**), **`list_payload_extract`:** **`unwrapped_object_values`** |
+| **`search_customer`** | **`customer_match_count`** **«0»** vs **`fullResultSize`** **6** | **`customer_match_count`** = **6**, **`api_full_result_size`:** **6** |
+| **`search_product`** | **`product_match_count`** **«0»** vs **`fullResultSize`** **4** | **`product_match_count`** = **4**, **`api_full_result_size`:** **4** |
+| **`tripletex_list_count_hint`** | — | **Ingen** linjer når **sideraden** = **`fullResultSize`** (forventet ved full treffside ≤ **100**) |
+| **`create_customer_precheck_search_result`** | **`api_candidate_count`** **0** med **`fullResultSize` > 0** (feil utpakking) | Ved **tomt** søk på unikt navn: **`api_candidate_count`** **0** og **`GET /customer`**-preview **`fullResultSize`:** **0** — **konsistent** |
+
+### Planner — smal faktura-justering (2026-03-20)
+
+- **`_trim_customer_name_at_product_boundary`:** Når **`kunde:`** fanges med **`[^\n,]+`** uten komma før **`produkt:`**, klippes kundenavn før **`produkt` / `vare` / `product`**. Dekker f.eks. *«opprett faktura kunde: Acme AS produkt: Kaffe 500 kr»* uten at hele halen havner i **`customer_name`**. **Invoice/payment-workflows** og Tripletex-kall er **urørt**; tester: **`tests/test_planner_invoice_customer_trim.py`**.
+
+**Eksplisitt (scope):** Faktura-planneren er **bare** forbedret for mønsteret **`kunde:` … `produkt:`** (ev. med komma). **Fri tekst** i stil med *«opprett faktura **for** kunde Acme AS …»* uten **`kunde:`**-etikett er **ikke** dekket av denne endringen og **forventes uendret** svakt.
+
+### Invoice plan-parsing — re-test etter trim (2026-03-20)
+
+**`build_plan` (ingen Tripletex-kall):**
+
+| Prompt (utdrag) | **`customer_name`** | **`product_name`** (utdrag) |
+|-----------------|---------------------|-----------------------------|
+| *«… kunde: Acme AS produkt: Kaffe 500 kr»* (uten komma) | **`Acme AS`** | **`Kaffe 500 kr`** |
+| *«… kunde: Acme AS, produkt: Kaffe 500 kr»* | **`Acme AS`** | **`Kaffe 500 kr`** |
+| *«opprett faktura for kunde Acme AS produkt Kaffe»* | fortsatt **`for kunde Acme AS`** (kjent språklig hull; **ikke** løst av trim) | **`Kaffe`** |
+
+**Merk:** Full **`plan_built`** / **`workflow_started`** for faktura mot sandbox er **ikke** nødvendig for å validere uttrekk; **`create_invoice_for_customer`** stopper fortsatt ofte på **miljø** (bankkonto) ved **POST /invoice**.
+
+### `create_customer` gjenbruk — live NM-sandbox (2026-03-20)
+
+| Scenario | HTTP | **`tripletex_http`** | **`POST /customer`** | Logger (kort) |
+|----------|------|----------------------|----------------------|----------------|
+| **«opprett kunde Acme AS»** (flere duplikater med samme eksakte navn i Tripletex) | **400** | **GET** `/customer` **200** | **Nei** | **`combined_exact_match_row_count`:** **6** → **`create_customer_reuse_rejected`** / **`create_customer_existing_match_ambiguous`** (tvetydig, ikke gjenbruk) |
+| **«opprett kunde Agent Verify NM 20260320»** (nøyaktig **én** eksakt treff i precheck) | **200** | **GET** `/customer` **200** | **Nei** | **`combined_exact_match_row_count`:** **1** → **`create_customer_existing_match_found`** / **`create_customer_existing_match_reused`** → **`workflow_finished`** **`customer_reused`:** **`true`** |
+
+**Bekreftet for gjenbruks-stien:** **`api_candidate_count`** og **`combined_exact_match_row_count`** stemmer med utpakkede rader; **ingen** **`tripletex_http`** **POST** `/customer` i logg for gjenbruk.
+
+**Eksplisitt (live-verifisert, NM-sandbox 2026-03-20):** **`create_customer`** **gjenbruk** er **live-verifisert** for **begge** utfallene nedenfor — i **begge** tilfeller **ingen** **`POST /customer`**:
+1. **`ambiguous_multiple_exact_matches`** — flere rader med samme eksakte navn → **400** + **`create_customer_existing_match_ambiguous`** (tvetydig, **ikke** gjenbruk som enkelt kunde).
+2. **Eksakt én treff** — **`combined_exact_match_row_count`:** **1** → **`customer_reused`:** **`true`** i **`workflow_finished`**, med **`create_customer_existing_match_*`**-logger, **uten** **POST**.
+
+### Hva som er grønt / stabilt vs. blokkert (2026-03-20)
+
+- **Reelt grønne og stabile i sandbox (ende-til-ende observert):** **`list_employees`**, **`search_customer`**, **`search_product`**, **`create_customer`** (både **ny** kunde og **gjenbruk** når nøyaktig **én** eksakt treff), **`create_product`**, **`noop`**. **`search_invoice`** / **`update_customer`** antas fortsatt OK med gyldig input (mindre nylig live-prøvd i samme økt).
+- **Miljø-blokkert (ikke kodefeil i agenten):** **`create_invoice_for_customer`** — **POST /invoice** krever bl.a. **bankkonto** i Tripletex-selskapet (**§16**). **`register_payment`** — trenger **synlig faktura** + **`TRIPLETEX_DEFAULT_PAYMENT_TYPE_ID`** (**§16**).
+- **Kode-/planner-gjeld (ikke miljø):** Naturlig norsk *«opprett faktura **for** kunde …»* uten **`kunde:`**-etikett gir fortsatt **svakt kundenavn** (se tabell over). Flere **identiske** «Acme AS»-rader → **400** tvetydig (forventet).
+
+---
+
+## 18. Score mode — grønne workflows (konkurranse-lignende prompts, 2026-03-20)
+
+### Metode (reproduserbar)
+
+- **Skript:** **`scripts/score_green_workflows.py`** — starter lokal **Uvicorn** (port **`SCORE_PORT`**, standard **9966**), **`POST /solve`** sekvensielt mot **`http://127.0.0.1:{port}/solve`**, credentials fra **`examples/local.solve_list_employees.json`** (NM-sandbox, samme mønster som tidligere live-tester).
+- **Artefakter (gitignored):** **`.score_mode_verify.log`** (server stdout), **`.score_mode_results.json`** (strukturert uttrekk per kall).
+- **Ikke kjørt i denne runden:** Endringer i **`create_invoice_for_customer`**, **`register_payment`**, eller fjerning av logger / **`failure_kind`**.
+
+### Prompts som ble testet (alle **plan_workflow** matchet forventet workflow)
+
+| # | Workflow | Prompt (naturlig variant) | HTTP | Merknad |
+|---|----------|----------------------------|------|---------|
+| 1 | **`list_employees`** | *«list employees»* | 200 | Stabil |
+| 2 | **`list_employees`** | *«ansatte»* | 200 | Stabil |
+| 3 | **`list_employees`** | *«Kan du vise ansatte?»* | 200 | Stabil (substring **«ansatte»**) |
+| 4 | **`search_customer`** | *«finn kunde Acme»* | 200 | Stabil |
+| 5 | **`search_customer`** | *«search customer Acme»* | 200 | Stabil |
+| 6 | **`search_customer`** | *«finn kunde»* (uten navn) | 400 | **Skjør / forventet:** **`workflow_input`**, **0** Tripletex-kall |
+| 7 | **`search_product`** | *«finn produkt Kaffe»* | 200 | Stabil |
+| 8 | **`search_product`** | *«søk produkt Kaffe»* | 200 | Stabil |
+| 9 | **`search_product`** | *«liste produkter»* (uten søkeord) | 400 | **Kjent hull:** tom tail etter trigger → **`workflow_input`**, **0** Tripletex-kall |
+| 10 | **`create_customer`** | *«opprett kunde Score Mode Unik 20260320»* (nytt navn) | 200 | **GET** + **POST** `/customer` (**2** `tripletex_http`), **`customer_reused`:** **`false`** |
+| 11 | **`create_customer`** | *«opprett kunde Agent Verify NM 20260320»* | 200 | **1** **GET** `/customer`, **ingen** **POST**; **`customer_reused`:** **`true`** (**eksakt én** treff) |
+| 12 | **`create_customer`** | *«opprett kunde Acme AS»* | 400 | **1** **GET**, **ingen** **POST**; **`workflow_input`** (flere eksakte duplikater) |
+| 13 | **`create_product`** | *«opprett produkt Score Mode Vare Alfa pris 49 kr»* | 200 | Stabil (**1** **POST** `/product`) |
+| 14 | **`create_product`** | *«nytt produkt Score Mode Vare Beta 10 kr»* | 200 | Stabil |
+| 15 | **`create_product`** | *«create product Score Mode Vare Gamma»* | 200 | Stabil (engelsk trigger) |
+
+### Observasjoner (API, tellere, logging)
+
+- **List/search:** **`workflow_finished`**-tall (**`employee_count`**, **`customer_match_count`**, **`product_match_count`**) stemte med **`api_full_result_size`** i logg; **`list_payload_extract`:** **`unwrapped_object_values`** der vist.
+- **`tripletex_list_count_hint`:** **Ingen** linjer i denne sandbox-runden (forventet når **side** = **total** for små datasett).
+- **Routing:** Ingen uventet **noop** eller feil workflow i tabellen over.
+- **Tvetydighet:** Flere treff på kunde-søk logges ikke som feil (design); **create_customer** med flere **eksakt** like navne-treff → tydelig **400** + **`failure_kind`:** **`workflow_input`**.
+- **Ny kunde vs. reuse:** Som i **§17** — **reuse** og **tvetydig** uten **POST**; **ny** kunde med **GET** + **POST**.
+
+### Live vs. miljø vs. kjent gjeld (etter runden)
+
+| Kategori | Innhold |
+|----------|---------|
+| **Live-verifisert (denne runden)** | Tabellen over + observasjoner; **§17** (reuse + list-telling) forblir gyldig historikk. |
+| **Miljø-blokkert** | Uendret: **§16** (**faktura** uten bankkonto, **betaling** uten faktura/type). **Ikke** retestet her. |
+| **Kjent planner-/kodegjeld (ikke fikset nå)** | *«liste produkter»* uten filter; *«finn kunde»* uten navn; faktura *«for kunde …»* uten **`kunde:`** (**§17**). **Merk:** fraser som *«liste medarbeidere»* / *«vis medarbeidere»* er **ikke** egne triggere — kan bli **noop**; **ingen** kodeendring i denne runden (unngår substring-konflikter med f.eks. *«opprett … medarbeidere»* uten egen designrunde). |
+
+### Kodeendringer knyttet til score mode
+
+- **Kun** tillegg av **`scripts/score_green_workflows.py`** (verifikasjon). **Ingen** endring i **invoice** / **payment**-**workflows** eller **planner**-routing i denne omgangen.
+
+### Anbefalt neste steg
+
+- Når **Tripletex**-miljø tillater: gjenoppta **§16** (**POST /invoice**, **register_payment**).
+- Valgfritt: egen **design**-sak for **ansatt**-synonymer (**medarbeidere**) med **ordgrenser** / lengre fraser — **ikke** hastverksendring.
+
+---
+
+## 19. NM i AI — konkurranse-submission og offentlig endpoint (2026-03-20)
+
+### Hva du skal lime inn i submission-skjemaet (NM i AI)
+
+| Felt | Anbefaling |
+|------|------------|
+| **Endpoint URL** | Full **HTTPS**-URL som peker direkte på **`POST /solve`**. **Nøyaktig mønster:** **`https://<SERVICE_URL_UTEN_PATH>/solve`** der **`<SERVICE_URL_UTEN_PATH>`** er **rot-URL** fra **Google Cloud Run** (f.eks. `https://ai-accounting-agent-xxxxx-ew.a.run.app`). **Må** ende med **`/solve`** — ikke bare rot-domenet. **Ikke** bruk Tripletex API-URL her. |
+| **API Key** | **Tom / blank** — FastAPI-appen i dette repoet har **ingen** innebygd Bearer- eller API-key-autentisering på **`/solve`**. Fyll **kun** inn nøkkel hvis dere **senere** setter foran en proxy med auth. |
+| **Tripletex `base_url` + `session_token`** | Kommer **ikke** i submission-endepunktfeltet. De sendes i **JSON-body** til **`/solve`** (`tripletex_credentials`), fra **konkurransens / NM sandbox**-konto, slik **`schemas.SolveRequestBody`** beskriver. |
+
+### Deploy- og runtime-forutsetninger (fra kode / Dockerfile — ikke endret i denne runden)
+
+- **Offentlig tjeneste:** Cloud Run deploy med **`--allow-unauthenticated`** (se **README.md**) eksponerer **`GET /health`** og **`POST /solve`** uten egen auth i appen.
+- **Port:** **`Dockerfile`** kjører **`uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}`** — **8080** som default; **Cloud Run** setter **`PORT`**. Ingen binding til **localhost** i container.
+- **Runtime uten lokale prosjektfiler:** Uploads skrives til **`/tmp`** (evt. **`AI_AGENT_UPLOAD_ROOT`**); Tripletex-kall bruker **`base_url`** fra request body — **ingen** hardkodet avhengighet til utviklermaskin eller repo-sti i **request path** (kun Python-moduler lastes fra image).
+
+### Request/response-kontrakt (uendret)
+
+- **Body:** `prompt`, `files` (valgfri), `tripletex_credentials` (`base_url`, `session_token`).
+- **Suksess:** **HTTP 200**, `{"status":"completed"}`.
+- **400:** `WorkflowInputError`, Pydantic-validering, eller **`credential_config`** (placeholder-URL/token) — se **`main.py`** / **`tripletex_credential_checks`**.
+- **502:** **`TripletexAPIError`** (upstream Tripletex), inkl. **`tripletex_configuration`**-prefiks ved selskapsoppsett (**§16**).
+- **Logger:** **`session_token`** og rå secrets logges **ikke** (**tripletex_request**).
+
+### Offentlig verifikasjon vs. lokal baseline
+
+| Nivå | Status |
+|------|--------|
+| **Lokal known-good** | **§17–§18** (grønne workflows, sandbox-token i `examples/local.*.json`). |
+| **Offentlig deploy** | **Må** verifiseres av team **etter** `gcloud run deploy` når **faktisk service-URL** foreligger. **Ingen** ekte Cloud Run-URL ble tilgjengeliggjort i denne workspace-økta; **automatisk curl mot produksjons-URL ble derfor ikke kjørt her.** |
+| **Miljø-blokkert (Tripletex)** | **§16** — faktura/betaling testes når sandbox/selskap tillater (**bankkonto**, synlig faktura, **payment type**). **Ingen** kodeendring i **invoice**/**payment** i denne oppgaven. |
+
+### Sjekkliste: kjør mot **deres** offentlige `BASE` etter deploy
+
+Erstatt **`BASE`** med **rot-URL uten path** (samme som i Cloud Run-konsollen, **uten** `/solve` på rot — **curl** bruker `/health` og `/solve` eksplisitt):
+
+```bash
+curl -sS "${BASE}/health"
+# Forventet: {"ok":true}
+
+curl -sS -w "\nHTTP:%{http_code}\n" -X POST "${BASE}/solve" \
+  -H "Content-Type: application/json" \
+  -d @examples/solve_list_employees.json
+# Forventet: HTTP 200 og {"status":"completed"} når tripletex_credentials i filen er gyldige sandbox-verdier
+```
+
+**Merk:** Bruk **HTTPS** som Cloud Run gir. Juster **`examples/solve_list_employees.json`** til **NM-sandbox** `base_url` + **session_token** (ikke commit token).
+
+### Deploy-risikoer / kjente begrensninger
+
+- **Kald start / timeout:** Cloud Run **request timeout** må være tilstrekkelig for Tripletex-kall (juster ved deploy om nødvendig).
+- **Minne:** Standard image er liten; ved store filopplastinger kan minne økes.
+- **Tripletex**-feil (502) er **ikke** «deploy-feil» — sjekk token, **base_url** (**/v2**), og selskapsoppsett (**§16**).
+
+### Eksakt tekst til «Endpoint URL»-feltet (copy-paste-mal)
+
+**Etter** dere har deployet, erstatt plassholderen med **deres** rot-URL fra Cloud Run:
+
+```
+https://ERSTATT_MED_CLOUD_RUN_SERVICE_URL/solve
+```
+
+Eksempel (fiktiv): `https://ai-accounting-agent-abc123-no.a.run.app/solve`
+
+---
+
+## 20. Container build / Artifact Registry / Cloud Run (vei B, 2026-03-20)
+
+### Bekreftet fra repo (ingen kodeendring i denne runden)
+
+| Sjekk | Status |
+|--------|--------|
+| **`Dockerfile`** | **`python:3.11-slim`**, `pip install -r requirements.txt`, `COPY . .`, **`CMD`** `uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}` |
+| **Avhengigheter** | **`requirements.txt`** (FastAPI, Uvicorn, requests, Pydantic) |
+| **Entrypoint** | **`main:app`** (FastAPI) |
+| **Port** | **8080** default; Cloud Run injiserer **`PORT`** — matcher **Cloud Run container port** **8080** |
+
+**Merk:** `docker build` bør kjøres fra **ren** arbeidskopi (unngå å bake inn `.venv` / store artefakter — bruk **`.dockerignore`** eller bygg via **Cloud Build** som respekterer `.gcloudignore` hvis dere legger det til senere).
+
+### GCP-kontekst (dette prosjektet)
+
+| Variabel | Verdi |
+|----------|--------|
+| **Project ID** | **`ai-nm26osl-1733`** |
+| **Region** | **`europe-west1`** |
+| **Cloud Run service** | **`ai-accounting-agent`** |
+| **Artifact Registry repo (foreslått navn)** | **`docker-repo`** |
+| **Image-navn** | **`ai-accounting-agent`** |
+| **Tag** | **`latest`** (bytt til digest/semver i produksjon etter behov) |
+
+### Runbook — kronologisk copy/paste (samme verdier som tabellen)
+
+**Forutsetning:** Terminal eller **Cloud Shell**; **`cd`** til **rotmappen** til dette repoet (der **`Dockerfile`** og **`main.py`** ligger). I Cloud Shell: **klon repo** eller **last opp** prosjektmappen — **ikke** kjør `gcloud builds submit` fra `~` uten kildekode.
+
+**Før du bygger — verifiser at du står riktig:**
+
+```bash
+pwd
+ls -la Dockerfile main.py
+```
+
+Hvis **`Dockerfile: No such file`** → du er ikke i prosjektroten; **`cd`** dit først.
+
+**Eksakt image-URL (brukes i deploy og i Artifact Registry):**
+
+```text
+europe-west1-docker.pkg.dev/ai-nm26osl-1733/docker-repo/ai-accounting-agent:latest
+```
+
+---
+
+#### Variant A — Cloud Build (anbefalt i Cloud Shell; ingen lokal Docker nødvendig)
+
+Kjør **blokken under i én økt** (rekkefølge: API-er → repo → bygg/push → deploy → URL → tester):
+
+```bash
+export PROJECT_ID=ai-nm26osl-1733
+export REGION=europe-west1
+export AR_REPO=docker-repo
+export IMAGE=ai-accounting-agent
+export TAG=latest
+export IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${IMAGE}:${TAG}"
+
+gcloud config set project "${PROJECT_ID}"
+
+gcloud services enable \
+  run.googleapis.com \
+  artifactregistry.googleapis.com \
+  cloudbuild.googleapis.com \
+  --project="${PROJECT_ID}"
+
+if ! gcloud artifacts repositories describe "${AR_REPO}" \
+  --location="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
+  gcloud artifacts repositories create "${AR_REPO}" \
+    --repository-format=docker \
+    --location="${REGION}" \
+    --description="Docker images for Cloud Run" \
+    --project="${PROJECT_ID}"
+fi
+
+gcloud builds submit --tag "${IMAGE_URI}" --project="${PROJECT_ID}" .
+
+gcloud run deploy ai-accounting-agent \
+  --image="${IMAGE_URI}" \
+  --region="${REGION}" \
+  --project="${PROJECT_ID}" \
+  --platform=managed \
+  --allow-unauthenticated \
+  --port=8080
+
+export BASE="$(gcloud run services describe ai-accounting-agent \
+  --region="${REGION}" --project="${PROJECT_ID}" --format='value(status.url)')"
+echo "BASE=${BASE}"
+
+curl -sS "${BASE}/health"
+echo
+
+curl -sS -w "\nHTTP:%{http_code}\n" -X POST "${BASE}/solve" \
+  -H "Content-Type: application/json" \
+  -d @examples/solve_list_employees.json
+```
+
+**Før siste `curl`:** Sett **gyldige** `tripletex_credentials` i **`examples/solve_list_employees.json`** (sandbox — ikke commit token).
+
+---
+
+#### Cloud Shell — feilsøking (hva du så)
+
+| Symptom | Årsak | Hva du gjør |
+|---------|--------|-------------|
+| **`ERROR: (gcloud.builds.submit) Invalid value for [source]: Dockerfile required when specifying --tag`** | **`gcloud builds submit … .`** ble kjørt fra **feil mappe** (f.eks. `~` uten kildekode). Cloud Build fant **ingen** `Dockerfile` i katalogen som ble sendt inn. | **`cd`** til repo-rot der **`Dockerfile`** ligger. Kjør **`ls Dockerfile`** før **`gcloud builds submit`**. |
+| **`Image '…/ai-accounting-agent:latest' not found`** | Bygget feilet (se over), så imaget ble **aldri** pushet til Artifact Registry. **`gcloud run deploy`** finner da ikke imaget. | Fiks **build** først; kjør deploy på nytt når **`gcloud builds submit`** er **OK**. |
+| **`GET /`** eller **`/health`** returnerer **HTML** («Congratulations» / «It's running!») | Tjenesten kjører fortsatt **demo-/hello-container** fra tidligere deploy, eller **ingen** vellykket deploy av app-imaget. | Etter vellykket **build + deploy** med riktig image skal **`curl "${BASE}/health"`** gi **`{"ok":true}`** (JSON), ikke HTML. |
+| **`curl: option -d: error encountered when reading a file`** | **`examples/solve_list_employees.json`** finnes ikke i **cwd** (du er ikke i repo-rot). | **`cd`** til prosjektrot, eller bruk **full sti** til JSON-filen. |
+| **Rotete terminal** (fragmenter som `…OST "${BASE}/solve"` …) | **Sammenlimt** copy/paste — flere kommandoer i én linje. | Lim inn **én** kommando om gangen, eller bruk hele runbook-blokken **fra et rent shell** etter **`cd`** til repo. |
+
+---
+
+#### Variant B — Lokal `docker build` + `docker push`
+
+Krever **Docker** installert og innlogging mot Artifact Registry:
+
+```bash
+export PROJECT_ID=ai-nm26osl-1733
+export REGION=europe-west1
+export AR_REPO=docker-repo
+export IMAGE=ai-accounting-agent
+export TAG=latest
+export IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${IMAGE}:${TAG}"
+
+gcloud config set project "${PROJECT_ID}"
+
+gcloud services enable \
+  run.googleapis.com \
+  artifactregistry.googleapis.com \
+  --project="${PROJECT_ID}"
+
+if ! gcloud artifacts repositories describe "${AR_REPO}" \
+  --location="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
+  gcloud artifacts repositories create "${AR_REPO}" \
+    --repository-format=docker \
+    --location="${REGION}" \
+    --description="Docker images for Cloud Run" \
+    --project="${PROJECT_ID}"
+fi
+
+gcloud auth configure-docker europe-west1-docker.pkg.dev
+
+docker build -t "${IMAGE_URI}" .
+docker push "${IMAGE_URI}"
+
+gcloud run deploy ai-accounting-agent \
+  --image="${IMAGE_URI}" \
+  --region="${REGION}" \
+  --project="${PROJECT_ID}" \
+  --platform=managed \
+  --allow-unauthenticated \
+  --port=8080
+
+export BASE="$(gcloud run services describe ai-accounting-agent \
+  --region="${REGION}" --project="${PROJECT_ID}" --format='value(status.url)')"
+echo "BASE=${BASE}"
+
+curl -sS "${BASE}/health"
+echo
+
+curl -sS -w "\nHTTP:%{http_code}\n" -X POST "${BASE}/solve" \
+  -H "Content-Type: application/json" \
+  -d @examples/solve_list_employees.json
+```
+
+---
+
+**NM Endpoint URL etter vellykket deploy:** **`${BASE}/solve`** (lim inn den **faktiske** `https://…`-strengen fra `echo BASE=…` + **`/solve`**).
+
+### Eksakt image-URL (lim inn i Cloud Run + dokumentasjon)
+
+Etter vellykket push er **full image-referanse**:
+
+```text
+europe-west1-docker.pkg.dev/ai-nm26osl-1733/docker-repo/ai-accounting-agent:latest
+```
+
+*(Hvis dere velger annet **repository ID** enn `docker-repo`, erstatt den delen av stien tilsvarende.)*
+
+---
+
+### 1) Enable API-er (én gang per prosjekt)
+
+```bash
+gcloud config set project ai-nm26osl-1733
+
+gcloud services enable \
+  run.googleapis.com \
+  artifactregistry.googleapis.com \
+  cloudbuild.googleapis.com \
+  --project=ai-nm26osl-1733
+```
+
+*(**`cloudbuild.googleapis.com`** trengs hvis dere bruker **`gcloud builds submit`**; for ren lokal **`docker push`** holder ofte **Artifact Registry** + **Run**.)*
+
+---
+
+### 2) Opprett Artifact Registry (Docker) i `europe-west1` (hvis det mangler)
+
+```bash
+gcloud artifacts repositories describe docker-repo \
+  --location=europe-west1 \
+  --project=ai-nm26osl-1733
+```
+
+Hvis den **ikke** finnes:
+
+```bash
+gcloud artifacts repositories create docker-repo \
+  --repository-format=docker \
+  --location=europe-west1 \
+  --description="Docker images for Cloud Run" \
+  --project=ai-nm26osl-1733
+```
+
+---
+
+### 3) Autentiser Docker mot Artifact Registry
+
+```bash
+gcloud auth configure-docker europe-west1-docker.pkg.dev
+```
+
+---
+
+### 4) Bygg og push image (fra **rot** av dette repoet)
+
+**Alternativ A — lokal Docker:**
+
+```bash
+cd "/sti/til/AI Accounting Agent"
+
+export PROJECT_ID=ai-nm26osl-1733
+export REGION=europe-west1
+export AR_REPO=docker-repo
+export IMAGE=ai-accounting-agent
+export TAG=latest
+
+docker build -t "${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${IMAGE}:${TAG}" .
+
+docker push "${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${IMAGE}:${TAG}"
+```
+
+**Alternativ B — Cloud Build (uten lokal Docker):**
+
+```bash
+cd "/sti/til/AI Accounting Agent"
+
+export PROJECT_ID=ai-nm26osl-1733
+export REGION=europe-west1
+export AR_REPO=docker-repo
+export IMAGE=ai-accounting-agent
+export TAG=latest
+
+gcloud builds submit --tag "${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${IMAGE}:${TAG}" \
+  --project="${PROJECT_ID}"
+```
+
+**Eksakt image-URL etter push** (samme som over):
+
+```text
+europe-west1-docker.pkg.dev/ai-nm26osl-1733/docker-repo/ai-accounting-agent:latest
+```
+
+---
+
+### 5) Cloud Run — bytt fra demo-image til app-image (konsoll)
+
+1. Gå til **Google Cloud Console** → **Cloud Run** → velg region **`europe-west1`** → tjeneste **`ai-accounting-agent`**.
+2. Klikk **Edit & deploy new revision** (eller **Rediger og distribuer ny revisjon**).
+3. Under **Container**:
+   - **Container image URL:** lim inn **nøyaktig**  
+     `europe-west1-docker.pkg.dev/ai-nm26osl-1733/docker-repo/ai-accounting-agent:latest`
+   - **Container port:** **8080** (skal samsvare med **`PORT`** / **Dockerfile**).
+4. **Ingress:** **All** (eller tilsvarende offentlig tilgang for konkurranse) — som før, med mindre dere med vilje begrenser.
+5. **Authentication:** **Allow unauthenticated invocations** (offentlig **`/health`** og **`/solve`** uten IAM på kallet), med mindre NM krever noe annet.
+6. **Deploy** / **Distribuer**.
+
+**Alternativ — `gcloud` (samme image, samme service):**
+
+```bash
+gcloud run deploy ai-accounting-agent \
+  --image=europe-west1-docker.pkg.dev/ai-nm26osl-1733/docker-repo/ai-accounting-agent:latest \
+  --region=europe-west1 \
+  --project=ai-nm26osl-1733 \
+  --platform=managed \
+  --allow-unauthenticated \
+  --port=8080
+```
+
+---
+
+### 6) Hent offentlig service-URL (rot, uten path)
+
+```bash
+gcloud run services describe ai-accounting-agent \
+  --region=europe-west1 \
+  --project=ai-nm26osl-1733 \
+  --format='value(status.url)'
+```
+
+Utdata er **`BASE`** (f.eks. `https://ai-accounting-agent-xxxxx-ew.a.run.app`).
+
+---
+
+### 7) Test etter deploy (offentlig)
+
+Erstatt **`BASE`** med URL fra forrige kommando.
+
+```bash
+curl -sS "${BASE}/health"
+# Forventet: {"ok":true}
+```
+
+**Grønn `/solve`** (Tripletex må være gyldig i JSON — bruk **NM sandbox** `base_url` + `session_token` i filen, ikke commit token):
+
+```bash
+curl -sS -w "\nHTTP:%{http_code}\n" -X POST "${BASE}/solve" \
+  -H "Content-Type: application/json" \
+  -d @examples/solve_list_employees.json
+# Forventet: HTTP 200 og {"status":"completed"} ved gyldige credentials og vellykket Tripletex-kall
+```
+
+*(Tilpass **`examples/solve_list_employees.json`** med deres sandbox-verdier før test.)*
+
+---
+
+### 8) NM i AI — **Endpoint URL** (nøyaktig)
+
+**Lim inn:**
+
+```text
+${BASE}/solve
+```
+
+**Konkret:** **`BASE`** fra **`gcloud run services describe … --format='value(status.url)'` + **`/solve`** på slutten.
+
+**Eksempel (kun form — erstatt med deres faktiske URL):**
+
+```text
+https://ai-accounting-agent-xxxxx-ew.a.run.app/solve
+```
+
+**API Key-felt:** **tomt** (**§19**).
+
+*Last updated: 2026-03-20 — **§20** inkl. deploy-runbook + Cloud Shell-feilsøking; **§19** NM endpoint; **§18** score mode; **§17** grønne workflows; **§16** faktura/payment miljø; **3.11** anbefalt.*

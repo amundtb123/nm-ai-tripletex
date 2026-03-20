@@ -25,6 +25,7 @@ If either value is still a placeholder or the URL is malformed, the app returns 
 | Variable | Needed for |
 |----------|------------|
 | `TRIPLETEX_DEFAULT_VAT_TYPE_ID` | `create_invoice_for_customer` (default in code often `3` — verify in sandbox) |
+| `TRIPLETEX_INVOICE_DUE_DAYS` | `create_invoice_for_customer`: `invoiceDueDate` = today + this many days (default **14**) |
 | `TRIPLETEX_DEFAULT_PAYMENT_TYPE_ID` | `register_payment` (**required** by workflow if unset) |
 | `TRIPLETEX_INVOICE_LINE_AMOUNT` | Invoice line default if no `… kr` in prompt |
 | `PORT` | Server port (default `8080`) |
@@ -91,7 +92,9 @@ Use the same **`request_id`** on all lines for one `/solve` call.
 - [ ] **`workflow_started`** — matches `plan_built.workflow`
 - [ ] **`tripletex_http`** — one or more lines: `status_code`, `path`, `query_param_keys`, short `response_preview`
 - [ ] **`workflow_finished`** — e.g. `customer_id`, `invoice_id`, `product_match_count`, … **or**
-- [ ] **`workflow_failed`** — `failure_kind` (`credential_config` / `workflow_input` / `tripletex` / …) and safe error fields
+- [ ] **`customer_resolver_invoice_pick`** / **`customer_resolver_invoice_fallback_search`** — when testing `create_invoice_for_customer` (fallback only if primary `GET /customer` is empty)
+- [ ] **`register_payment_attempt`** — before `PUT /invoice/{id}/:payment`: `invoice_id`, `payment_type_id`, `paid_amount`, `payment_date`, `customer_id` (no secrets)
+- [ ] **`workflow_failed`** — `failure_kind` (`credential_config` / `workflow_input` / `tripletex` / **`tripletex_configuration`** — manglende selskapsoppsett i Tripletex, f.eks. bankkonto / …) and safe error fields
 - [ ] **`request_finished`** — `outcome`, `http_status`
 
 **Not logged:** `session_token`, `Authorization`, full response bodies (only truncated preview on `tripletex_http`).
@@ -100,6 +103,22 @@ Use the same **`request_id`** on all lines for one `/solve` call.
 
 - **200** + `{"status":"completed"}` — workflow completed (including **noop** if no trigger matched).
 - **400** — validation / `WorkflowInputError` / **credential_config** (placeholder or invalid `base_url` / `session_token` before Tripletex).
-- **502** — Tripletex API error (`TripletexAPIError`).
+- **502** — Tripletex API error (`TripletexAPIError`). Meldinger om f.eks. manglende **bankkontonummer** prefikses som **Tripletex / selskapsoppsett** (ikke agent-feil); logger bruker **`failure_kind`:** **`tripletex_configuration`**.
+
+### `register_payment` (end-to-end)
+
+1. **`export TRIPLETEX_DEFAULT_PAYMENT_TYPE_ID=<id>`** — ID fra Tripletex (selskap / betalingstyper), ikke gjettet.
+2. Bruk **`fakturanummer` og beløp** som matcher en **eksisterende** faktura synlig i **`GET /invoice`** (ca. siste 730 dager). Hvis sandbox har **0** fakturaer, opprett/registrer en i Tripletex først eller bruk annet miljø.
+3. Bekreft **`register_payment_attempt`** deretter **`tripletex_http`** **`PUT`** **`/invoice/{id}/:payment`** med **HTTP 200**.
 
 Sanity-check HTTP status against **`request_finished.http_status`** in logs.
+
+### Optional: score-mode batch (green workflows)
+
+From project root, with a real token in **`examples/local.solve_list_employees.json`**:
+
+```bash
+SCORE_PORT=9966 .venv/bin/python scripts/score_green_workflows.py
+```
+
+Writes **`.score_mode_results.json`** (and server log **`.score_mode_verify.log`**). See **`PROJECT_STATE.md` §18** for how results were interpreted (gitignored artifacts).

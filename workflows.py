@@ -10,7 +10,13 @@ import uuid
 from datetime import date, timedelta
 from typing import Any
 
-from customer_resolver import search_customer_by_name, resolve_customer_by_name
+from customer_resolver import (
+    find_exact_customer_matches_for_create,
+    resolve_customer_by_name,
+    resolve_customer_for_invoice,
+    search_customer_by_name,
+    search_customer_by_name_with_meta,
+)
 from product_resolver import (
     pick_best_product_match,
     resolve_product_by_name_or_number,
@@ -18,6 +24,7 @@ from product_resolver import (
 )
 from planner import Plan
 from tripletex_client import TripletexClient
+from tripletex_list import tripletex_list_rows_from_response
 from tripletex_request import tripletex_json
 
 log = logging.getLogger(__name__)
@@ -175,9 +182,30 @@ def workflow_list_employees(plan: Plan, client: TripletexClient) -> dict[str, st
         "/employee",
         params={"from": 0, "count": 100},
     )
-    values = _unwrap_value(data)
-    n = len(values) if isinstance(values, list) else 0
-    return {"workflow": "list_employees", "status": "ok", "employee_count": str(n)}
+    rows, tag, full_size = tripletex_list_rows_from_response(data)
+    n = len(rows)
+    if full_size is not None and full_size != n:
+        log.info(
+            json.dumps(
+                {
+                    "event": "tripletex_list_count_hint",
+                    "resource": "employee",
+                    "list_payload_extract": tag,
+                    "api_full_result_size": full_size,
+                    "rows_in_page": n,
+                },
+                ensure_ascii=False,
+            )
+        )
+    out: dict[str, str] = {
+        "workflow": "list_employees",
+        "status": "ok",
+        "employee_count": str(n),
+        "list_payload_extract": tag,
+    }
+    if full_size is not None:
+        out["api_full_result_size"] = str(full_size)
+    return out
 
 
 def workflow_search_customer(plan: Plan, client: TripletexClient) -> dict[str, str]:
@@ -186,12 +214,30 @@ def workflow_search_customer(plan: Plan, client: TripletexClient) -> dict[str, s
         raise WorkflowInputError(
             "Oppgi kundenavn etter utløseren, f.eks. «finn kunde Acme AS»."
         )
-    matches = search_customer_by_name(client, log, name)
-    return {
+    matches, tag, full_size = search_customer_by_name_with_meta(client, log, name)
+    n = len(matches)
+    if full_size is not None and full_size != n:
+        log.info(
+            json.dumps(
+                {
+                    "event": "tripletex_list_count_hint",
+                    "resource": "customer",
+                    "list_payload_extract": tag,
+                    "api_full_result_size": full_size,
+                    "rows_in_page": n,
+                },
+                ensure_ascii=False,
+            )
+        )
+    out: dict[str, str] = {
         "workflow": "search_customer",
         "status": "ok",
-        "customer_match_count": str(len(matches)),
+        "customer_match_count": str(n),
+        "list_payload_extract": tag,
     }
+    if full_size is not None:
+        out["api_full_result_size"] = str(full_size)
+    return out
 
 
 def workflow_create_customer(plan: Plan, client: TripletexClient) -> dict[str, str]:
@@ -200,6 +246,74 @@ def workflow_create_customer(plan: Plan, client: TripletexClient) -> dict[str, s
         raise WorkflowInputError(
             "Oppgi navn på ny kunde etter utløseren, f.eks. «opprett kunde Ny Bedrift AS»."
         )
+    # Unngå duplikater: eksakt navn (normalisert) i eksisterende GET /customer-treff → gjenbruk rad.
+    exact_rows = find_exact_customer_matches_for_create(client, log, name)
+    if len(exact_rows) > 1:
+        log.info(
+            json.dumps(
+                {
+                    "event": "create_customer_reuse_rejected",
+                    "reason": "ambiguous_multiple_exact_matches",
+                    "combined_exact_match_row_count": len(exact_rows),
+                },
+                ensure_ascii=False,
+                default=str,
+            )
+        )
+        log.info(
+            json.dumps(
+                {
+                    "event": "create_customer_existing_match_ambiguous",
+                    "exact_match_row_count": len(exact_rows),
+                },
+                ensure_ascii=False,
+                default=str,
+            )
+        )
+        raise WorkflowInputError(
+            "Flere kunder har allerede nøyaktig samme navn i Tripletex som du prøver å opprette. "
+            "Rydd duplikater i Tripletex eller bruk et tydelig annet navn."
+        )
+    if len(exact_rows) == 1:
+        row = exact_rows[0]
+        rid = row.get("id")
+        cid = str(int(rid)) if rid is not None else ""
+        log.info(
+            json.dumps(
+                {
+                    "event": "create_customer_existing_match_found",
+                    "customer_id": cid,
+                },
+                ensure_ascii=False,
+            )
+        )
+        log.info(
+            json.dumps(
+                {
+                    "event": "create_customer_existing_match_reused",
+                    "customer_id": cid,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return {
+            "workflow": "create_customer",
+            "status": "ok",
+            "customer_id": cid,
+            "customer_reused": "true",
+        }
+
+    log.info(
+        json.dumps(
+            {
+                "event": "create_customer_create_chosen",
+                "reason": "post_new_customer_after_precheck_has_zero_combined_exact_rows",
+                "combined_exact_match_row_count": 0,
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+    )
     data = tripletex_json(
         client,
         log,
@@ -211,7 +325,12 @@ def workflow_create_customer(plan: Plan, client: TripletexClient) -> dict[str, s
     cid = ""
     if isinstance(obj, dict) and obj.get("id") is not None:
         cid = str(obj["id"])
-    return {"workflow": "create_customer", "status": "ok", "customer_id": cid}
+    return {
+        "workflow": "create_customer",
+        "status": "ok",
+        "customer_id": cid,
+        "customer_reused": "false",
+    }
 
 
 def workflow_update_customer(plan: Plan, client: TripletexClient) -> dict[str, str]:
@@ -254,18 +373,23 @@ def workflow_search_product(plan: Plan, client: TripletexClient) -> dict[str, st
             "Oppgi produktnavn eller varenummer etter utløseren, "
             "f.eks. «finn produkt Kaffe» eller «søk produkt varenummer: ABC-1»."
         )
-    matches = search_products_fallback(client, log, name=pname, product_number=pnum)
+    matches, tag, full_size = search_products_fallback(client, log, name=pname, product_number=pnum)
+    n = len(matches)
     _ = pick_best_product_match(
         matches,
         query_name=pname,
         query_number=pnum,
         log=log,
     )
-    return {
+    out: dict[str, str] = {
         "workflow": "search_product",
         "status": "ok",
-        "product_match_count": str(len(matches)),
+        "product_match_count": str(n),
+        "list_payload_extract": tag,
     }
+    if full_size is not None:
+        out["api_full_result_size"] = str(full_size)
+    return out
 
 
 def workflow_create_product(plan: Plan, client: TripletexClient) -> dict[str, str]:
@@ -403,6 +527,23 @@ def workflow_register_payment(plan: Plan, client: TripletexClient) -> dict[str, 
         raise WorkflowInputError("Tripletex returnerte faktura uten id.")
     iid = int(rid)
 
+    log.info(
+        json.dumps(
+            {
+                "event": "register_payment_attempt",
+                "invoice_id": iid,
+                "invoice_number": str(inv_row.get("invoiceNumber") or inv_no),
+                "payment_type_id": payment_type_id,
+                "payment_date": pay_date,
+                "paid_amount": amount,
+                "customer_id": cid,
+                "invoice_search_match_count": len(rows),
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+    )
+
     tripletex_json(
         client,
         log,
@@ -433,10 +574,15 @@ def workflow_create_invoice_for_customer(plan: Plan, client: TripletexClient) ->
         raise WorkflowInputError(
             "Oppgi kundenavn etter utløseren, f.eks. «opprett faktura Acme AS»."
         )
-    cust = resolve_customer_by_name(client, log, cname)
-    if cust is None:
+    cust, inv_res = resolve_customer_for_invoice(client, log, cname)
+    if inv_res == "not_found":
         raise WorkflowInputError(
             f"Fant ingen kunde som matcher «{cname}». Opprett kunden først, eller skriv et mer presist navn."
+        )
+    if inv_res == "ambiguous":
+        raise WorkflowInputError(
+            f"Flere kunder matcher «{cname}» omtrent like godt. Bruk «kunde: Eksakt navn slik det står i Tripletex, "
+            f"produkt: …» (gjerne med komma mellom feltene), eller presiser firmanavnet."
         )
 
     cid = int(cust["id"])
@@ -518,12 +664,18 @@ def workflow_create_invoice_for_customer(plan: Plan, client: TripletexClient) ->
             "vatType": {"id": vat_id},
         }
 
+    due_days = int(os.environ.get("TRIPLETEX_INVOICE_DUE_DAYS", "14"))
+    invoice_due = (date.today() + timedelta(days=due_days)).isoformat()
+
     body = {
         "invoiceDate": today,
+        "invoiceDueDate": invoice_due,
         "customer": {"id": cid},
         "orders": [
             {
                 "orderDate": today,
+                "deliveryDate": today,
+                "customer": {"id": cid},
                 "isPrioritizeAmountsIncludingVat": False,
                 "orderLines": [order_line],
             }

@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import requests
+
+# Tripletex messages that indicate missing company / tenant setup rather than bad request payload.
+_TENANT_CONFIG_HINT = re.compile(
+    r"(bankkonto|bank\s*konto|bank\s*account|bankkontonummer)",
+    re.IGNORECASE,
+)
 
 
 class TripletexAPIError(Exception):
@@ -29,6 +36,17 @@ class TripletexAPIError(Exception):
         self.developer_message = developer_message
         self.validation_messages = validation_messages or []
 
+    def is_tenant_configuration_error(self) -> bool:
+        """
+        True when Tripletex indicates missing company/environment setup (e.g. bank account),
+        as opposed to malformed input from this service.
+        """
+        blob = self.api_message
+        for vm in self.validation_messages:
+            blob += " " + str(vm.get("message") or "")
+            blob += " " + str(vm.get("field") or "")
+        return bool(_TENANT_CONFIG_HINT.search(blob))
+
     def public_detail(self) -> str:
         """Safe string for HTTP responses / logs (no secrets)."""
         parts: list[str] = [self.api_message]
@@ -39,7 +57,13 @@ class TripletexAPIError(Exception):
                     parts.append(str(msg))
         if self.request_id:
             parts.append(f"requestId={self.request_id}")
-        return "; ".join(parts)
+        core = "; ".join(parts)
+        if self.is_tenant_configuration_error():
+            return (
+                "Tripletex / selskapsoppsett (krever endring i Tripletex-selskapet eller miljø, "
+                f"ikke feil i agent-koden): {core}"
+            )
+        return core
 
 
 def _truncate(text: str, max_len: int = 500) -> str:

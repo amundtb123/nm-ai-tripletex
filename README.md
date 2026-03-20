@@ -161,6 +161,10 @@ Cloud Run setter `PORT` automatisk; containeren leser `${PORT:-8080}` i `Dockerf
 
 3. Kall den utstedte URL-en med samme `/health` og `/solve` som lokalt.
 
+**Konkurranse (NM i AI) submission-skjema:** Fyll **Endpoint URL** med **`https://<cloud-run-service-url>/solve`** (full path til **`/solve`**). **API Key** kan stå **tom** med denne appen (ingen innebygd nøkkel på `/solve`). Se **`PROJECT_STATE.md` §19** for sjekkliste og detaljer.
+
+**Artifact Registry + bytte image på eksisterende Cloud Run-tjeneste:** Eksakte **`gcloud`**-kommandoer, image-URL og test-curl — **`PROJECT_STATE.md` §20**.
+
 ### Merk
 
 - Legg ikke ekte `session_token` i image eller kildekode; bruk hemmeligheter (Secret Manager / env på Cloud Run) når dere går videre.
