@@ -36,7 +36,16 @@ _WORKFLOW_TARGET: dict[WorkflowKind, str] = {
 
 # First matching rule wins (ordered by specificity / product needs).
 _WORKFLOW_RULES: tuple[tuple[WorkflowKind, tuple[str, ...]], ...] = (
-    ("list_employees", ("list employees", "ansatte")),
+    (
+        "list_employees",
+        (
+            "list employees",
+            "find employees",
+            "show employees",
+            "get employees",
+            "ansatte",
+        ),
+    ),
     ("search_invoice", ("search invoice", "find invoice", "søk faktura", "finn faktura")),
     (
         "register_payment",
