@@ -290,6 +290,57 @@ def _list_employees_fallback_tokens(prompt: str) -> tuple[str, str] | None:
     return (vm.group(1).lower(), em.group(1).lower())
 
 
+# create_customer: natural prompts split "create" / "new" and "customer" / "kunde"
+_CREATE_CUSTOMER_ENTITY_RE = re.compile(
+    r"\b(customers?|client|clients|kunde|kunder)\b",
+    re.IGNORECASE,
+)
+_CREATE_CUSTOMER_VERB_RE = re.compile(
+    r"\b(create|add|register|new|opprett)\b",
+    re.IGNORECASE,
+)
+
+
+def _tail_after_last_customer_entity(prompt: str) -> str:
+    last = None
+    for m in _CREATE_CUSTOMER_ENTITY_RE.finditer(prompt):
+        last = m
+    if not last:
+        return ""
+    return _clean_tail(prompt[last.end() :])
+
+
+def _substantive_tail_for_customer_fallback(tail: str) -> bool:
+    """True if tail has at least two word characters (not just «.» or whitespace)."""
+    t = _clean_tail(tail)
+    if len(t) < 2:
+        return False
+    return bool(re.search(r"\w", t, re.UNICODE))
+
+
+def _create_customer_fallback_tokens(prompt: str) -> tuple[str, str] | None:
+    """
+    Verb + customer-entity; requires a usable name (label or non-empty tail after entity).
+    Avoids matching bare «customer» mentions without create-intent or without a name.
+    """
+    em = _CREATE_CUSTOMER_ENTITY_RE.search(prompt)
+    vm = _CREATE_CUSTOMER_VERB_RE.search(prompt)
+    if not em or not vm:
+        return None
+    labeled = _extract_label_value(prompt, "kunde", "customer", "name", "navn")
+    tail_after = _tail_after_last_customer_entity(prompt)
+    if not labeled.strip() and not _substantive_tail_for_customer_fallback(tail_after):
+        return None
+    return (vm.group(1).lower(), em.group(1).lower())
+
+
+def _create_customer_fallback_tail(prompt: str) -> str:
+    labeled = _extract_label_value(prompt, "kunde", "customer", "name", "navn")
+    if labeled.strip():
+        return labeled.strip()
+    return _tail_after_last_customer_entity(prompt)
+
+
 def _strip_product_metadata(tail: str) -> str:
     """Remove common inline price / code fragments to keep a cleaner display name."""
     s = tail
@@ -314,7 +365,7 @@ def _select_workflow(
     """
     Returns (workflow, tail, route_kind, route_detail).
 
-    route_kind: \"exact\" (substring trigger), \"fallback\" (list_employees word-based), or None (noop).
+    route_kind: \"exact\" (substring trigger), \"fallback\" (word-based), or None (noop).
     route_detail: matched trigger phrase (exact) or \"verb=…|entity=…\" (fallback); empty for noop.
     """
     lower = prompt.lower()
@@ -329,6 +380,16 @@ def _select_workflow(
     if toks:
         verb, ent = toks
         return "list_employees", "", "fallback", f"verb={verb}|entity={ent}"
+    toks_cc = _create_customer_fallback_tokens(prompt)
+    if toks_cc:
+        verb_c, ent_c = toks_cc
+        tail_cc = _create_customer_fallback_tail(prompt)
+        return (
+            "create_customer",
+            tail_cc,
+            "fallback",
+            f"verb={verb_c}|entity={ent_c}",
+        )
     return "noop", "", None, ""
 
 
