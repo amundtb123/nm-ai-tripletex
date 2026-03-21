@@ -60,6 +60,8 @@ class TestBuildLlmRouterUserContent(unittest.TestCase):
 
     def test_heuristic_section_is_reference_not_command(self) -> None:
         body = build_llm_router_user_content("Finn kunden Acme")
+        self.assertIn("router_guardrails:", body)
+        self.assertIn("standalone_green_likely: True", body)
         self.assertIn("heuristic_ranking (reference only", body)
         self.assertIn("heuristic_top_workflow:", body)
         self.assertIn("per_workflow_scores:", body)

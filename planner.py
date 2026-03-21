@@ -729,6 +729,8 @@ def _noop_plan_with_llm_detail(plan: Plan, detail: str) -> Plan:
         status = "low_confidence"
     elif detail == "llm_chose_noop":
         status = "llm_noop"
+    elif detail == "guardrail_rejected_llm_green":
+        status = "guardrail_rejected_green"
     return plan.model_copy(
         update={
             "planner_llm_status": status,

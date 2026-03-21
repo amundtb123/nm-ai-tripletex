@@ -32,6 +32,8 @@ GREEN_WORKFLOWS = (
 _LLM_CONFIDENCE_MIN = 0.45
 # Lower bar + tighter gap → fewer false "ambiguous" noops when a green workflow is clearly ahead.
 _HEURISTIC_MIN_SCORE = 2.85
+# When the prompt is a clear standalone CRM/product/employee task, allow a slightly lower bar for override.
+_HEURISTIC_MIN_SCORE_STANDALONE = 2.48
 _HEURISTIC_AMBIGUITY_GAP = 0.48
 # Only treat as ambiguous when the runner-up is also quite strong (both workflows plausible).
 _HEURISTIC_SECOND_STRONG_MIN = 3.15
@@ -132,14 +134,22 @@ Allowed workflows (green scope only):
 - create_product — add a NEW product to the catalog (opprett/nytt produkt with article data).
 - noop — ONLY when the task is clearly NOT about employees, customers, or products in this system (e.g. invoice creation, payment registration, unrelated chat). Choosing noop for a plausible employee/customer/product request is a routing ERROR.
 
+Out-of-scope (always noop — do NOT map to green even if customer/product/email/price appear):
+- Invoice/payment workflows: disputes, reminders, overdue, fees, KID, «faktura til kunde» as a billing task, registering payment.
+- Projects, payroll, monthly/period close, accruals/reversals — unless the ONLY ask is explicitly to find/register a customer or product as a CRM task (see standalone rule below).
+
+Standalone green tasks (these stay in green scope):
+- Explicitly: find/search/list/show customer or product or employees; register new customer or new product; price/stock questions for a catalog article; «who are the employees».
+
 Decision procedure (follow in order):
-1) Entity: employees, customer, product, or none.
-2) If employees → list_employees.
-3) If customer or product: decide lookup vs create.
-4) Prefer search_* when the user asks to find/check/verify/price/stock/existing, or gives identifying details without clear «new/register/create» for that entity.
-5) Prefer create_* only when the user clearly asks to add/register/create a new customer or product.
-6) If unsure between search and create → choose search_*.
-7) noop only when no supported entity is plausible (invoice/payment-first tasks stay noop).
+1) If the message is mainly invoice/payment/project/payroll/period-close → noop.
+2) Entity: employees, customer, product, or none.
+3) If employees → list_employees.
+4) If customer or product: decide lookup vs create.
+5) Prefer search_* when the user asks to find/check/verify/price/stock/existing, or gives identifying details without clear «new/register/create» for that entity.
+6) Prefer create_* only when the user clearly asks to add/register/create a new customer or product.
+7) If unsure between search and create → choose search_*.
+8) noop when step 1 applies or no supported entity is plausible.
 
 Search-over-create (hard rules):
 - Email, phone, or address alone do NOT imply create_customer; with «finn/søk/look up» they support search_customer.
@@ -154,6 +164,9 @@ Contrast (mapping hints):
 - «Opprett et nytt produkt SuperWidget 3000 til 199 kr» → create_product
 - «Hvem er de ansatte i bedriften?» → list_employees
 - «Registrer betaling på faktura 12345» → noop
+- «Invoice is wrong for customer Acme AS» → noop (complaint, not CRM)
+- «Create project linked to customer X» → noop
+- «Payroll email for employee» → noop
 
 The user message includes deterministic signals (hints). They are auxiliary — apply the decision procedure above; do not blindly copy the top heuristic.
 
@@ -258,22 +271,89 @@ def collect_router_signals(raw_prompt: str) -> dict[str, Any]:
     }
 
 
-def _heuristic_blocked(raw_prompt: str) -> bool:
-    """Do not override LLM noop for invoice/payment-first prompts (out of green scope)."""
+def _standalone_green_request(raw_prompt: str) -> bool:
+    """
+    True when the user is clearly asking for a CRM/catalog/staff task, not invoice/payment/payroll/close.
+    Used to unblock heuristics and to avoid suppressing green scores for these prompts.
+    """
     low = raw_prompt.lower()
-    # Clear green-scope routing — never zero-out scores for these (even if "faktura"/"betaling" appear).
     if re.search(
         r"\b(hvem|who)\s+.{0,40}?\b(jobber|ansatt|ansatte|employee|staff|kollegaer|medarbeider|medarbeidere)\b",
         low,
     ):
-        return False
+        return True
     if re.search(
         r"\b(finn|søk|finne|look\s+up|search|vis\s+alle|liste|oversikt|hent)\s+.{0,48}?"
         r"\b(kunde|kunden|kunder|kundene|vare|varen|varer|produkt|produkter|produktet|artikkel|"
         r"ansatte?|medarbeider|medarbeidere|employee|staff|kollegaer)\b",
         low,
     ):
+        return True
+    if re.search(
+        r"\b(hvem\s+er\s+de\s+ansatte|ansatte\s+i\s+bedriften|de\s+ansatte|list\s+employees|show\s+(all\s+)?staff)\b",
+        low,
+    ):
+        return True
+    if re.search(r"\b(opprett\s+et\s+nytt\s+produkt|opprett\s+nytt\s+produkt)\b", low):
+        return True
+    if re.search(
+        r"\b(registrer\s+ny\s+kunde|register\s+new\s+customer|add\s+new\s+customer|new\s+client|ny\s+kunde)\b",
+        low,
+    ):
+        return True
+    # Catalog price/stock — not invoice line / billing discussion
+    if re.search(
+        r"\b(hva\s+er\s+prisen|pris\s+på|prisen\s+på|har\s+vi|på\s+lager|stock|inventory|"
+        r"what\s+is\s+the\s+price|what\s+is\s+the\s+cost)\b",
+        low,
+    ):
+        if re.search(r"\b(faktura|invoice)\b", low):
+            return False
+        return True
+    return False
+
+
+def _non_green_accounting_context(raw_prompt: str) -> bool:
+    """Invoice/payment/project/payroll/period-close — green workflows are not in scope (unless standalone)."""
+    from planner import _classify_intent
+
+    low = raw_prompt.lower()
+    intent = _classify_intent(raw_prompt)
+    if intent in ("invoice", "payment"):
+        return True
+    if re.search(r"\b(prosjekt|project)\b", low) and re.search(
+        r"\b(kunde|customer|client|koble|link|for\s+customer|til\s+kunde|linked)\b",
+        low,
+    ):
+        return True
+    if re.search(
+        r"\b(lønn|payroll|payslip|payslips|lønns|timelønn|feriepenger|salary|pay\s+run)\b",
+        low,
+    ):
+        return True
+    if re.search(
+        r"\b(månedsavslutning|månedlig\s+avslutning|månedlig\s+lukning|monthly\s+close|"
+        r"period\s+close|year[- ]end|årsavslutning|accrual|periodisering|reversal|reversering|"
+        r"avsetning|bokslut|periodisere)\b",
+        low,
+    ):
+        return True
+    if re.search(
+        r"\b(overdue|forfalt|purring|påminnelse|reminder|inkasso|collection|"
+        r"late\s+fee|pålagt\s+gebyr|reminder\s+fee|service\s+fee)\b",
+        low,
+    ) and re.search(r"\b(faktura|invoice|betaling|payment)\b", low):
+        return True
+    return False
+
+
+def _heuristic_blocked(raw_prompt: str) -> bool:
+    """Do not use green heuristics or accept LLM green when prompt is out of green scope."""
+    if _standalone_green_request(raw_prompt):
         return False
+    low = raw_prompt.lower()
+    if _non_green_accounting_context(raw_prompt):
+        return True
     if re.search(
         r"\b(registrer\s+betaling|register\s+payment|pay\s+invoice|betal\s+faktura|invoice\s+payment|payment\s+for\s+invoice)\b",
         low,
@@ -408,7 +488,8 @@ def heuristic_green_workflow_after_llm_noop(raw_prompt: str) -> tuple[str, str, 
 
     compact = "|".join(f"{k.split('_')[0][:2]}={v:.1f}" for k, v in sorted(scores.items(), key=lambda x: -x[1]))
 
-    if best_s < _HEURISTIC_MIN_SCORE:
+    min_score = _HEURISTIC_MIN_SCORE_STANDALONE if _standalone_green_request(raw_prompt) else _HEURISTIC_MIN_SCORE
+    if best_s < min_score:
         return None
     if best_s - second_s < _HEURISTIC_AMBIGUITY_GAP and second_s >= _HEURISTIC_SECOND_STRONG_MIN:
         return None
@@ -464,10 +545,17 @@ def build_llm_router_user_content(raw_prompt: str) -> str:
 
     # Compact coarse intent for context (same string as planner intent classifier).
     coarse = s["coarse_intent"]
+    sg = _standalone_green_request(raw_prompt)
+    ng = _non_green_accounting_context(raw_prompt)
 
     return (
         "[router_input]\n"
         f"original_prompt: {raw_prompt.strip()}\n"
+        "\n"
+        "router_guardrails:\n"
+        f"  standalone_green_likely: {sg}\n"
+        f"  non_green_accounting_context: {ng}\n"
+        "  (If non_green_accounting_context and not standalone_green_likely → prefer noop.)\n"
         "\n"
         "entity_signals:\n"
         f"  customer: {entity_customer}\n"
@@ -675,6 +763,18 @@ def try_llm_plan_after_noop_with_detail(raw_prompt: str) -> tuple[Plan | None, s
     if llm is None:
         return None, "llm_invalid_response"
 
+    guardrail_rejected_llm_green = False
+    if llm.workflow in GREEN_WORKFLOWS and _heuristic_blocked(raw_prompt):
+        guardrail_rejected_llm_green = True
+        llm = LLMRouterJSON(
+            workflow="noop",
+            confidence=0.95,
+            language=llm.language or "unknown",
+            entity="unknown",
+            reason="guardrail_rejected_green_for_accounting_oos",
+            extraction_summary="green_blocked_oos",
+        )
+
     def _plan_from_heuristic_override() -> tuple[Plan, str] | None:
         hw = heuristic_green_workflow_after_llm_noop(raw_prompt)
         if hw is None:
@@ -709,7 +809,7 @@ def try_llm_plan_after_noop_with_detail(raw_prompt: str) -> tuple[Plan | None, s
     if llm.confidence < _LLM_CONFIDENCE_MIN:
         return None, f"low_confidence:{llm.confidence:.2f}"
     if llm.workflow == "noop":
-        return None, "llm_chose_noop"
+        return None, "guardrail_rejected_llm_green" if guardrail_rejected_llm_green else "llm_chose_noop"
     return llm_router_json_to_plan(raw_prompt, llm), "ok"
 
 
