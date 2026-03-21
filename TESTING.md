@@ -30,6 +30,40 @@ If either value is still a placeholder or the URL is malformed, the app returns 
 | `TRIPLETEX_INVOICE_LINE_AMOUNT` | Invoice line default if no `… kr` in prompt |
 | `PORT` | Server port (default `8080`) |
 | `LOG_LEVEL` | e.g. `INFO` or `DEBUG` |
+| `LLM_PLANNER_ENABLED` | Sett `1` / `true` for **Spor B** LLM-router etter `noop` (krever også API-nøkkel; se `PROJECT_STATE.md` §2.1) |
+| `OPENAI_API_KEY` eller `LLM_PLANNER_API_KEY` | OpenAI-kompatibel nøkkel når LLM-planner er aktivert |
+| `LLM_PLANNER_BASE_URL` / `LLM_PLANNER_MODEL` | Valgfritt; default OpenAI `v1` + `gpt-4o-mini` |
+
+### LLM-router (Spor B) — verifisering etter Cloud Run-deploy
+
+**Når LLM faktisk ble brukt** (vellykket routing til et grønt workflow), skal **`plan_built`** inneholde:
+
+- **`planner_mode`:** **`llm`**
+- **`workflow_route`:** **`llm`**
+- **`planner_llm_status`:** **`ok`**
+- **`workflow`:** f.eks. `list_employees`, `search_customer`, … (innenfor første LLM-scope)
+- **`planner_confidence`**, **`planner_language`**, **`planner_route_detail`** (kort oppsummering — ingen hemmeligheter)
+
+**Eksempel — siste `plan_built` for en request** (tilpass prosjekt/region; JSON i logglinjen kan være `jsonPayload` eller rå tekst avhengig av oppsett):
+
+```bash
+gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="ai-accounting-agent" AND jsonPayload.event="plan_built"' \
+  --project=YOUR_PROJECT_ID --limit=5 --format=json | \
+  jq '.[] | .jsonPayload | {planner_mode, workflow, workflow_route, planner_llm_status, planner_confidence}'
+```
+
+Hvis du logger til stdout som ren JSON (som i appen), filtrer på `event=="plan_built"` og feltet **`planner_mode`**.
+
+**Eksempelprompts å teste etter deploy** (naturlig språk — forvent **`noop`** fra regler alene, deretter **`planner_mode`:** **`llm`** når LLM er aktivert):
+
+| Språk | Prompt (eksempel) | Forventet workflow (typisk) |
+|--------|---------------------|-----------------------------|
+| Norsk | «Kan du vise meg hvem som jobber hos oss?» | `list_employees` |
+| Engelsk | «I need to look up an existing customer named Acme Ltd» | `search_customer` |
+| Norsk | «Registrer ny kunde Krokstrand AS» | `create_customer` |
+| Engelsk | «Find our product by code 1001» | `search_product` |
+
+Juster navn/produkt til det som finnes i **din** sandbox. Prompts som **allerede** treffer eksakte fraser (f.eks. «list employees») gir **`planner_mode`:** **`exact_rule`** — da kalles **ikke** LLM.
 
 ## Run the app locally
 
@@ -88,7 +122,7 @@ Use the same **`request_id`** on all lines for one `/solve` call.
 
 - [ ] **`request_received`** — `file_count`, `tripletex_base_url` (no token), `tripletex_base_url_source`, `tripletex_base_url_placeholder_like`, `tripletex_session_token_placeholder_like` (booleans only — never the token value)
 - [ ] **`files_decoded`** — `count` (and `filenames` if uploads)
-- [ ] **`plan_built`** — `workflow`, `detected_intent`, `has_customer_name`, `has_product_*`, `has_payment_*`, …
+- [ ] **`plan_built`** — `workflow`, `detected_intent`, **`planner_mode`** (`exact_rule` / `regex_fallback` / `llm` / `noop`), **`planner_selected_workflow`**, **`planner_selected_entity`**, **`planner_confidence`**, **`planner_language`**, **`planner_llm_status`**, **`planner_route_detail`**, `workflow_route`, `has_customer_name`, `has_product_*`, `has_payment_*`, …
 - [ ] **`workflow_started`** — matches `plan_built.workflow`
 - [ ] **`tripletex_http`** — one or more lines: `status_code`, `path`, `query_param_keys`, short `response_preview`
 - [ ] **`workflow_finished`** — e.g. `customer_id`, `invoice_id`, `product_match_count`, … **or**

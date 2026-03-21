@@ -1,4 +1,4 @@
-"""Build a simple execution plan from the user prompt (rule-based, no LLM)."""
+"""Build an execution plan from the user prompt: exact rules → regex fallback → optional LLM router (Spor B)."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 IntentKind = Literal["create", "update", "delete", "search", "invoice", "payment", "unknown"]
+PlannerMode = Literal["exact_rule", "regex_fallback", "llm", "noop"]
 WorkflowKind = Literal[
     "list_employees",
     "search_invoice",
@@ -318,6 +319,14 @@ def _substantive_tail_for_customer_fallback(tail: str) -> bool:
     return bool(re.search(r"\w", t, re.UNICODE))
 
 
+def _customer_name_fallback_tail(prompt: str) -> str:
+    """Label or text after last customer-entity token (shared by create/search fallbacks)."""
+    labeled = _extract_label_value(prompt, "kunde", "customer", "name", "navn")
+    if labeled.strip():
+        return labeled.strip()
+    return _tail_after_last_customer_entity(prompt)
+
+
 def _create_customer_fallback_tokens(prompt: str) -> tuple[str, str] | None:
     """
     Verb + customer-entity; requires a usable name (label or non-empty tail after entity).
@@ -335,10 +344,78 @@ def _create_customer_fallback_tokens(prompt: str) -> tuple[str, str] | None:
 
 
 def _create_customer_fallback_tail(prompt: str) -> str:
-    labeled = _extract_label_value(prompt, "kunde", "customer", "name", "navn")
+    return _customer_name_fallback_tail(prompt)
+
+
+# search_* fallbacks: search/find/list/… — not create|add|… (those hit create_* first in order)
+_SEARCH_VERB_RE = re.compile(
+    r"\b(search|find|finn|søk|lookup|locate|list)\b",
+    re.IGNORECASE,
+)
+
+_PRODUCT_ENTITY_RE = re.compile(
+    r"\b(products?|produkt|produkter|vare|varer)\b",
+    re.IGNORECASE,
+)
+
+
+def _tail_after_last_product_entity(prompt: str) -> str:
+    last = None
+    for m in _PRODUCT_ENTITY_RE.finditer(prompt):
+        last = m
+    if not last:
+        return ""
+    return _clean_tail(prompt[last.end() :])
+
+
+def _product_name_fallback_tail(prompt: str) -> str:
+    labeled = _extract_label_value(prompt, "produkt", "vare", "product", "linje")
     if labeled.strip():
         return labeled.strip()
-    return _tail_after_last_customer_entity(prompt)
+    return _tail_after_last_product_entity(prompt)
+
+
+def _search_customer_fallback_tokens(prompt: str) -> tuple[str, str] | None:
+    """Search-intent verb + customer entity + query tail (same guards as create_customer)."""
+    em = _CREATE_CUSTOMER_ENTITY_RE.search(prompt)
+    vm = _SEARCH_VERB_RE.search(prompt)
+    if not em or not vm:
+        return None
+    labeled = _extract_label_value(prompt, "kunde", "customer", "name", "navn")
+    tail_after = _tail_after_last_customer_entity(prompt)
+    if not labeled.strip() and not _substantive_tail_for_customer_fallback(tail_after):
+        return None
+    return (vm.group(1).lower(), em.group(1).lower())
+
+
+def _search_product_fallback_tokens(prompt: str) -> tuple[str, str] | None:
+    """Search-intent verb + product entity + name/code signal."""
+    em = _PRODUCT_ENTITY_RE.search(prompt)
+    vm = _SEARCH_VERB_RE.search(prompt)
+    if not em or not vm:
+        return None
+    labeled = _extract_label_value(prompt, "produkt", "vare", "product", "linje")
+    tail_after = _tail_after_last_product_entity(prompt)
+    if (
+        not labeled.strip()
+        and not _substantive_tail_for_customer_fallback(tail_after)
+        and not _extract_product_code(prompt)
+    ):
+        return None
+    return (vm.group(1).lower(), em.group(1).lower())
+
+
+def _create_product_fallback_tokens(prompt: str) -> tuple[str, str] | None:
+    """Create-intent verb + product entity + name tail (same verb set as create_customer)."""
+    em = _PRODUCT_ENTITY_RE.search(prompt)
+    vm = _CREATE_CUSTOMER_VERB_RE.search(prompt)
+    if not em or not vm:
+        return None
+    labeled = _extract_label_value(prompt, "produkt", "vare", "product", "linje")
+    tail_after = _tail_after_last_product_entity(prompt)
+    if not labeled.strip() and not _substantive_tail_for_customer_fallback(tail_after):
+        return None
+    return (vm.group(1).lower(), em.group(1).lower())
 
 
 def _strip_product_metadata(tail: str) -> str:
@@ -367,6 +444,8 @@ def _select_workflow(
 
     route_kind: \"exact\" (substring trigger), \"fallback\" (word-based), or None (noop).
     route_detail: matched trigger phrase (exact) or \"verb=…|entity=…\" (fallback); empty for noop.
+    Fallback order after strict rules: list_employees → create_customer → search_customer →
+    search_product → create_product (each requires verb+entity regex matches; see helpers above).
     """
     lower = prompt.lower()
     for kind, triggers in _WORKFLOW_RULES:
@@ -390,6 +469,33 @@ def _select_workflow(
             "fallback",
             f"verb={verb_c}|entity={ent_c}",
         )
+    toks_sc = _search_customer_fallback_tokens(prompt)
+    if toks_sc:
+        v, e = toks_sc
+        return (
+            "search_customer",
+            _customer_name_fallback_tail(prompt),
+            "fallback",
+            f"verb={v}|entity={e}",
+        )
+    toks_sp = _search_product_fallback_tokens(prompt)
+    if toks_sp:
+        v, e = toks_sp
+        return (
+            "search_product",
+            _product_name_fallback_tail(prompt),
+            "fallback",
+            f"verb={v}|entity={e}",
+        )
+    toks_cpr = _create_product_fallback_tokens(prompt)
+    if toks_cpr:
+        v, e = toks_cpr
+        return (
+            "create_product",
+            _product_name_fallback_tail(prompt),
+            "fallback",
+            f"verb={v}|entity={e}",
+        )
     return "noop", "", None, ""
 
 
@@ -411,15 +517,22 @@ class Plan(BaseModel):
     payment_date: str = ""
     notes: str = ""
     hints: list[str] = Field(default_factory=list)
-    workflow_route: Optional[Literal["exact", "fallback"]] = None
+    workflow_route: Optional[Literal["exact", "fallback", "llm"]] = None
     workflow_route_detail: str = ""
+    planner_mode: PlannerMode = "noop"
+    planner_selected_workflow: str = ""
+    planner_selected_entity: str = ""
+    planner_confidence: Optional[float] = None
+    planner_language: Optional[str] = None
+    planner_llm_status: Optional[str] = None
+    planner_route_detail: str = ""
 
 
-def build_plan(prompt: str) -> Plan:
+def build_plan_rules(prompt: str) -> Plan:
     """
     Keyword routing + light field extraction (regex only).
 
-    TODO: LLM / robust parsing when competition tasks require it.
+    When this returns ``noop``, :func:`build_plan` may invoke the LLM router (Spor B).
     """
     intent = _classify_intent(prompt)
     wf, tail, route_kind, route_detail = _select_workflow(prompt)
@@ -513,6 +626,14 @@ def build_plan(prompt: str) -> Plan:
         hints.append(f"workflow_route={route_kind}")
         if route_detail:
             hints.append(f"workflow_route_detail={route_detail}")
+
+    planner_mode: PlannerMode = "noop"
+    if wf != "noop":
+        if route_kind == "exact":
+            planner_mode = "exact_rule"
+        elif route_kind == "fallback":
+            planner_mode = "regex_fallback"
+
     return Plan(
         raw_prompt=prompt,
         detected_intent=intent,
@@ -533,4 +654,42 @@ def build_plan(prompt: str) -> Plan:
         hints=hints,
         workflow_route=route_kind if route_kind in ("exact", "fallback") else None,
         workflow_route_detail=route_detail,
+        planner_mode=planner_mode,
+        planner_selected_workflow=wf,
+        planner_selected_entity=target,
+        planner_confidence=None,
+        planner_language=None,
+        planner_llm_status=None,
+        planner_route_detail=route_detail[:500] if route_detail else "",
     )
+
+
+def _noop_plan_with_llm_detail(plan: Plan, detail: str) -> Plan:
+    status = "noop"
+    if detail == "llm_disabled":
+        status = "disabled"
+    elif detail == "llm_invalid_response":
+        status = "invalid_response"
+    elif detail.startswith("low_confidence:"):
+        status = "low_confidence"
+    elif detail == "llm_chose_noop":
+        status = "llm_noop"
+    return plan.model_copy(
+        update={
+            "planner_llm_status": status,
+            "planner_route_detail": detail[:500],
+        }
+    )
+
+
+def build_plan(prompt: str) -> Plan:
+    """Rules + regex first; if ``noop``, optionally call LLM router (env-gated)."""
+    plan = build_plan_rules(prompt)
+    if plan.workflow != "noop":
+        return plan
+    from planner_llm import try_llm_plan_after_noop_with_detail
+
+    alt, detail = try_llm_plan_after_noop_with_detail(prompt)
+    if alt is not None:
+        return alt
+    return _noop_plan_with_llm_detail(plan, detail)
