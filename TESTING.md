@@ -40,11 +40,16 @@ If either value is still a placeholder or the URL is malformed, the app returns 
 
 - **`planner_mode`:** **`llm`**
 - **`workflow_route`:** **`llm`**
-- **`planner_llm_status`:** **`ok`**
+- **`planner_llm_status`:** **`ok`** (ren modell-ruting) **eller** **`ok_heuristic_override`** (modell ga **`noop`**, heuristikk valgte grønt workflow)
 - **`workflow`:** f.eks. `list_employees`, `search_customer`, … (innenfor første LLM-scope)
 - **`planner_confidence`**, **`planner_language`**, **`planner_route_detail`** (kort oppsummering — ingen hemmeligheter)
+- **`planner_heuristic_log`:** ofte tom ved **`ok`**; ved **`ok_heuristic_override`** kort streng med **`override_noop->…`** og score-hint (ingen rå nøkler)
 
-**Unngå falsk negativ:** Hvis du ser **`planner_llm_status`:** **`llm_noop`** med **`detected_intent`:** **`create`** og **`has_phone`** / **`has_email`:** **true**, er det et tegn på at LLM burde ha valgt et grønt workflow — etter router-justering skal **`planner_route_detail`** ved suksess inneholde kompakt **`i=…|em=…|ph=…`** (hint-avledning) for feilsøking.
+**Skille `llm_noop` vs suksess:**  
+- **`planner_llm_status`:** **`llm_noop`** (i `Plan` / logg som **`planner_mode`:** **`noop`**) → både modell **og** heuristikk ga ingen trygg grønn route → **`workflow_finished`** **`no_matching_workflow_trigger`**.  
+- **`ok`** eller **`ok_heuristic_override`** → forvent **`workflow`** ≠ **`noop`** og vanlig **`workflow_finished`** for grønt spor.
+
+**Unngå falsk negativ:** Hvis du fortsatt ser **`llm_noop`** med **`has_email`/`has_phone`** og tydelig kunde-kontekst, sjekk **`planner_heuristic_log`** (tom = heuristikk fant ikke tydelig vinner) og vurder å rapportere prompt-eksempel til videre tuning.
 
 **Eksempel — siste `plan_built` for en request** (tilpass prosjekt/region; JSON i logglinjen kan være `jsonPayload` eller rå tekst avhengig av oppsett):
 
@@ -126,7 +131,7 @@ Use the same **`request_id`** on all lines for one `/solve` call.
 
 - [ ] **`request_received`** — `file_count`, `tripletex_base_url` (no token), `tripletex_base_url_source`, `tripletex_base_url_placeholder_like`, `tripletex_session_token_placeholder_like` (booleans only — never the token value)
 - [ ] **`files_decoded`** — `count` (and `filenames` if uploads)
-- [ ] **`plan_built`** — `workflow`, `detected_intent`, **`planner_mode`** (`exact_rule` / `regex_fallback` / `llm` / `noop`), **`planner_selected_workflow`**, **`planner_selected_entity`**, **`planner_confidence`**, **`planner_language`**, **`planner_llm_status`**, **`planner_route_detail`**, `workflow_route`, `has_customer_name`, `has_product_*`, `has_payment_*`, …
+- [ ] **`plan_built`** — `workflow`, `detected_intent`, **`planner_mode`** (`exact_rule` / `regex_fallback` / `llm` / `noop`), **`planner_selected_workflow`**, **`planner_selected_entity`**, **`planner_confidence`**, **`planner_language`**, **`planner_llm_status`** (`ok` / `ok_heuristic_override` / `llm_noop` / …), **`planner_route_detail`**, **`planner_heuristic_log`**, `workflow_route`, `has_customer_name`, `has_product_*`, `has_payment_*`, …
 - [ ] **`workflow_started`** — matches `plan_built.workflow`
 - [ ] **`tripletex_http`** — one or more lines: `status_code`, `path`, `query_param_keys`, short `response_preview`
 - [ ] **`workflow_finished`** — e.g. `customer_id`, `invoice_id`, `product_match_count`, … **or**

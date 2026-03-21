@@ -21,7 +21,17 @@ LLM_ROUTER_WORKFLOWS = frozenset(
     }
 )
 
+GREEN_WORKFLOWS = (
+    "list_employees",
+    "search_customer",
+    "create_customer",
+    "search_product",
+    "create_product",
+)
+
 _LLM_CONFIDENCE_MIN = 0.45
+_HEURISTIC_MIN_SCORE = 3.4
+_HEURISTIC_AMBIGUITY_GAP = 0.65
 
 
 class LLMRouterJSON(BaseModel):
@@ -78,7 +88,7 @@ def _openai_chat_json(system: str, user: str) -> dict[str, Any] | None:
     url = f"{base}/chat/completions"
     payload = {
         "model": model,
-        "temperature": 0.1,
+        "temperature": 0.05,
         "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": system},
@@ -100,86 +110,223 @@ def _openai_chat_json(system: str, user: str) -> dict[str, Any] | None:
         return None
 
 
-_SYSTEM_PROMPT = """You are a JSON router for an accounting assistant (Tripletex backend). Your job is to pick ONE workflow and extract slots. Do NOT output API URLs, HTTP methods, or Tripletex paths.
+_SYSTEM_PROMPT = """You are a JSON router for an accounting assistant (Tripletex). Pick exactly ONE workflow and extract slots. Never output URLs, HTTP methods, or API paths.
 
-Allowed workflows (only these):
-- list_employees: list/show/find who works at the company (employees, staff, ansatte, medarbeidere).
-- search_customer: find or look up an EXISTING customer/client (kunde) by name or identifier.
-- create_customer: register or add a NEW customer/client; often includes name, phone, email, address.
-- search_product: find or look up an EXISTING product/article (vare/produkt).
-- create_product: add a NEW product/article to the catalog.
-- noop: ONLY use when the message is clearly NOT about any of the above (e.g. unrelated topic, payment/invoice-only request, or empty noise). Do NOT choose noop just because wording is informal or multilingual.
+Allowed workflows:
+- list_employees — show/list who works here: employees, staff, team, ansatte, medarbeidere, kolleger, "who works", "everyone at the company".
+- search_customer — find an EXISTING customer/client (kunde, kunden, client) by name or identifier; "look up", "find", "søk", "finn".
+- create_customer — register/add a NEW customer; contact blocks (email + phone), "new client", "registrer kunde", company names with contact info.
+- search_product — find an EXISTING product/article (vare, produkt) or by article number.
+- create_product — add a NEW product/article to the catalog.
+- noop — ONLY when the message cannot reasonably be any of the five above (e.g. pure invoice/payment/bank tasks with no customer/product/employee action, or unrelated chit-chat).
 
-Routing priorities (avoid unnecessary noop):
-- If the user wants to add/register a new customer (or gives contact details for a new client) → create_customer. Mention of phone, email, or "new customer" supports this.
-- If they want to find/search an existing customer → search_customer.
-- If they want to add a new product or article → create_product; if they want to find a product → search_product.
-- If they want a list of employees/staff → list_employees.
-- When in doubt between two of these five, prefer the workflow that matches the strongest cue (create vs search, customer vs product); use noop only when none of the five fit.
+Critical rules:
+- **Almost never choose noop** if the user is asking about employees, customers, or products in natural language (any language). Map to the closest workflow.
+- If **coarse_intent** is create or the text includes **email and/or phone** without a clear product focus → strongly prefer **create_customer** (contact registration).
+- If the user wants to **find / search / look up** a **customer** → **search_customer**.
+- If **product** + **find/search** → **search_product**; **product** + **create/add** → **create_product**.
+- **noop** is wrong for: contact details + company/person name, "add client", "new customer", "liste ansatte", "find product".
 
-Slots:
-- Fill customer_name / product_name / product_number when you can infer them from the text; otherwise empty strings.
-- language: short hint (no, en, da, sv, de, unknown, …).
-- extraction_summary: one short sentence (no secrets; mask emails as [email] if needed).
-- confidence: 0.0–1.0 for your workflow choice.
+Slots: customer_name, product_name, product_number (strings; empty if unknown). language: short code. extraction_summary: one short reason (mask emails as [email]). confidence: 0.0–1.0.
 
-Output a single JSON object with keys: workflow, confidence, language, customer_name, product_name, product_number, extraction_summary.
+Output JSON keys: workflow, confidence, language, customer_name, product_name, product_number, extraction_summary.
 """
 
 
-def build_llm_router_user_content(raw_prompt: str) -> str:
-    """
-    Original prompt plus non-secret heuristic hints so the model routes create/search cases
-    that regex missed (e.g. NM natural language + phone/email).
-    """
-    from planner import _classify_intent, _extract_email, _extract_phone
+def collect_router_signals(raw_prompt: str) -> dict[str, Any]:
+    """Deterministic signals for prompts + heuristics (no secrets)."""
+    from planner import _classify_intent, _extract_email, _extract_phone, _extract_product_code
 
+    low = raw_prompt.lower()
     intent = _classify_intent(raw_prompt)
     has_email = bool(_extract_email(raw_prompt))
     has_phone = bool(_extract_phone(raw_prompt))
-    low = raw_prompt.lower()
+    pcode = _extract_product_code(raw_prompt)
+
     mentions_customer = bool(
         re.search(
             r"\b(customer|customers|client|clients|kunde|kunden|kunder|kundene|firma|company)\b",
             low,
-            re.IGNORECASE,
         )
     )
     mentions_product = bool(
-        re.search(r"\b(product|products|produkt|produkter|vare|varer|article|articles)\b", low)
+        re.search(r"\b(product|products|produkt|produkter|vare|varer|article|articles|sku)\b", low)
     )
     mentions_employee = bool(
         re.search(
-            r"\b(employee|employees|staff|team|ansatt|ansatte|medarbeider|medarbeidere|kollegaer)\b",
+            r"\b(employee|employees|staff|team|ansatt|ansatte|medarbeider|medarbeidere|kollegaer|colleagues)\b",
             low,
         )
     )
     mentions_find = bool(
         re.search(
-            r"\b(find|search|lookup|look\s+up|søk|finn|oppslag|liste|list|show|display|vis|hent)\b",
+            r"\b(find|search|lookup|look\s+up|søk|finn|finne|oppslag|seek|locate)\b",
             low,
         )
+    )
+    mentions_list = bool(
+        re.search(r"\b(list|show|display|vis|liste|get|hent|print|give\s+me)\b", low)
     )
     mentions_create = bool(
         re.search(
-            r"\b(create|add|register|new|opprett|registrer|legg\s+til|ny\s+kunde|ny\s+kunder|nytt\s+produkt)\b",
+            r"\b(create|add|register|new|opprett|registrer|legg\s+til|ny\s+kunde|nytt\s+produkt|set\s+up)\b",
             low,
         )
     )
+    mentions_who = bool(re.search(r"\b(who|whom|hvem|alle|all|everyone|everybody)\b", low))
+
+    return {
+        "coarse_intent": intent,
+        "has_email_in_text": has_email,
+        "has_phone_in_text": has_phone,
+        "has_product_code_in_text": bool(pcode),
+        "mentions_customer_terms": mentions_customer,
+        "mentions_product_terms": mentions_product,
+        "mentions_employee_terms": mentions_employee,
+        "mentions_find_verbs": mentions_find,
+        "mentions_list_or_show_verbs": mentions_list,
+        "mentions_create_or_add_verbs": mentions_create,
+        "mentions_who_or_all": mentions_who,
+    }
+
+
+def _heuristic_blocked(raw_prompt: str) -> bool:
+    """Do not override LLM noop for invoice/payment-first prompts (out of green scope)."""
+    low = raw_prompt.lower()
+    if re.search(
+        r"\b(registrer\s+betaling|register\s+payment|pay\s+invoice|betal\s+faktura|invoice\s+payment|payment\s+for\s+invoice)\b",
+        low,
+    ):
+        return True
+    if re.search(
+        r"\b(opprett\s+faktura|create\s+invoice|invoice\s+for\s+customer|new\s+invoice|ny\s+faktura)\b",
+        low,
+    ):
+        return True
+    if re.search(r"\b(bank|swift|iban|kid\b|remittance)\b", low) and not re.search(
+        r"\b(kunde|customer|produkt|product|ansatt|employee)\b",
+        low,
+    ):
+        return True
+    return False
+
+
+def _score_green_workflows(raw_prompt: str) -> dict[str, float]:
+    """Higher = better fit for that workflow."""
+    if _heuristic_blocked(raw_prompt):
+        return {w: 0.0 for w in GREEN_WORKFLOWS}
+
+    from planner import _classify_intent, _extract_email, _extract_phone, _extract_product_code
+
+    s = collect_router_signals(raw_prompt)
+    low = raw_prompt.lower()
+    intent = _classify_intent(raw_prompt)
+    has_em = s["has_email_in_text"]
+    has_ph = s["has_phone_in_text"]
+    pcode = _extract_product_code(raw_prompt)
+
+    scores = {w: 0.0 for w in GREEN_WORKFLOWS}
+
+    if s["mentions_employee_terms"]:
+        scores["list_employees"] += 4.5
+        if s["mentions_list_or_show_verbs"] or s["mentions_find_verbs"] or s["mentions_who_or_all"]:
+            scores["list_employees"] += 2.5
+        if re.search(r"\b(work|works|jobber|ansett|hire)\b", low):
+            scores["list_employees"] += 1.0
+
+    if s["mentions_customer_terms"] and s["mentions_create_or_add_verbs"]:
+        scores["create_customer"] += 6.0
+    if (has_em or has_ph) and s["mentions_customer_terms"]:
+        scores["create_customer"] += 5.0
+    if has_em and has_ph and not s["mentions_product_terms"] and not s["mentions_employee_terms"]:
+        scores["create_customer"] += 5.5
+    if intent == "create" and (has_em or has_ph) and not s["mentions_product_terms"]:
+        scores["create_customer"] += 4.0
+    if intent == "create" and s["mentions_customer_terms"]:
+        scores["create_customer"] += 3.0
+    if s["mentions_customer_terms"] and not s["mentions_find_verbs"] and (has_em or has_ph):
+        scores["create_customer"] += 2.5
+
+    if s["mentions_customer_terms"] and s["mentions_find_verbs"]:
+        scores["search_customer"] += 6.0
+        if not s["mentions_create_or_add_verbs"]:
+            scores["search_customer"] += 2.0
+    if s["mentions_customer_terms"] and intent == "search":
+        scores["search_customer"] += 3.0
+
+    if scores["search_customer"] > 0 and scores["create_customer"] > 0:
+        if s["mentions_create_or_add_verbs"] and not s["mentions_find_verbs"]:
+            scores["search_customer"] -= 3.0
+        elif s["mentions_find_verbs"] and not s["mentions_create_or_add_verbs"]:
+            scores["create_customer"] -= 3.0
+
+    if s["mentions_product_terms"] and s["mentions_create_or_add_verbs"]:
+        scores["create_product"] += 6.0
+    if intent == "create" and s["mentions_product_terms"]:
+        scores["create_product"] += 3.0
+
+    if s["mentions_product_terms"] and s["mentions_find_verbs"]:
+        scores["search_product"] += 6.0
+    if pcode:
+        scores["search_product"] += 3.5
+    if s["mentions_product_terms"] and intent == "search":
+        scores["search_product"] += 2.0
+
+    if re.search(r"\b(faktura|invoice)\s*(nr|no|number|#)?\s*[:#]?\s*\d{3,}", low):
+        scores["create_customer"] -= 2.5
+        scores["search_customer"] -= 1.0
+
+    for w in GREEN_WORKFLOWS:
+        scores[w] = max(0.0, scores[w])
+
+    return scores
+
+
+def heuristic_green_workflow_after_llm_noop(raw_prompt: str) -> tuple[str, str, float, str] | None:
+    """
+    When the LLM returned noop, pick a green workflow from deterministic scores if confident enough.
+    Returns (workflow, reason, confidence, scores_compact) or None.
+    """
+    scores = _score_green_workflows(raw_prompt)
+    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    if not ranked:
+        return None
+    best_wf, best_s = ranked[0]
+    second_s = ranked[1][1] if len(ranked) > 1 else 0.0
+
+    compact = "|".join(f"{k.split('_')[0][:2]}={v:.1f}" for k, v in sorted(scores.items(), key=lambda x: -x[1]))
+
+    if best_s < _HEURISTIC_MIN_SCORE:
+        return None
+    if best_s - second_s < _HEURISTIC_AMBIGUITY_GAP and second_s >= 2.8:
+        return None
+
+    conf = min(0.74, 0.5 + best_s * 0.035)
+    reason = f"heuristic_scores winner={best_wf} best={best_s:.1f} second={second_s:.1f}"
+    return (best_wf, reason, conf, compact[:400])
+
+
+def build_llm_router_user_content(raw_prompt: str) -> str:
+    """Original prompt + deterministic hints + top heuristic suggestion."""
+    s = collect_router_signals(raw_prompt)
+    hint_lines = [f"- {k}: {v}" for k, v in s.items()]
+    scores = _score_green_workflows(raw_prompt)
+    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    top_suggestion = (
+        f"heuristic_top_workflow={ranked[0][0]} (score {ranked[0][1]:.1f})"
+        if ranked
+        else "heuristic_top_workflow=none"
+    )
+    score_line = "heuristic_scores: " + ", ".join(f"{k}={v:.1f}" for k, v in ranked)
+
     return (
         f"{raw_prompt.strip()}\n\n"
         "---\n"
         "Routing hints (deterministic, no secrets):\n"
-        f"- coarse_intent: {intent}\n"
-        f"- has_email_in_text: {has_email}\n"
-        f"- has_phone_in_text: {has_phone}\n"
-        f"- mentions_customer_terms: {mentions_customer}\n"
-        f"- mentions_product_terms: {mentions_product}\n"
-        f"- mentions_employee_terms: {mentions_employee}\n"
-        f"- mentions_find_or_list_verbs: {mentions_find}\n"
-        f"- mentions_create_or_add_verbs: {mentions_create}\n"
-        "Use these hints together with the user text. Prefer a green workflow when cues align; "
-        "use noop only when the request is outside employee/customer/product tasks."
+        + "\n".join(hint_lines)
+        + f"\n- {top_suggestion}\n- {score_line}\n"
+        + "You MUST output one of the five green workflows if any hint or the user text plausibly matches "
+        "employees, customers, or products. Use noop only for clear out-of-scope requests.\n"
     )
 
 
@@ -198,7 +345,57 @@ def call_llm_router(prompt: str) -> LLMRouterJSON | None:
     return obj
 
 
-def llm_router_json_to_plan(raw_prompt: str, llm: LLMRouterJSON) -> "Plan":
+def _synthetic_llm_from_heuristic(
+    raw_prompt: str,
+    workflow: str,
+    reason: str,
+    confidence: float,
+    scores_compact: str,
+) -> LLMRouterJSON:
+    """Build router JSON after heuristic override of model noop."""
+    from planner import _extract_label_value, _extract_product_code, _strip_product_metadata
+
+    customer_name = ""
+    product_name = ""
+    product_number = _extract_product_code(raw_prompt)
+
+    if workflow in ("create_customer", "search_customer"):
+        customer_name = _extract_label_value(raw_prompt, "kunde", "customer", "name", "navn", "firma", "company")
+        customer_name = (customer_name or "").strip()
+        if not customer_name:
+            m = re.search(
+                r"\b(?:client|kunde|customer)\s+([A-ZÆØÅa-zæøå][A-Za-zÆØÅæøå0-9\s&\.\-]{1,64}?)(?:\s*[,.]|\s+email|\s+phone|\s+tlf|\s+@|\s*$)",
+                raw_prompt,
+                re.IGNORECASE,
+            )
+            if m:
+                customer_name = m.group(1).strip()
+
+    if workflow in ("create_product", "search_product"):
+        product_name = _extract_label_value(raw_prompt, "produkt", "vare", "product", "article", "linje")
+        product_name = _strip_product_metadata(product_name) if product_name else ""
+        if not product_name and workflow == "search_product":
+            product_name = _strip_product_metadata(raw_prompt)[:120]
+
+    summary = f"noop_override|{reason}|sc={scores_compact[:120]}"
+    return LLMRouterJSON(
+        workflow=workflow,  # type: ignore[arg-type]
+        confidence=confidence,
+        language="unknown",
+        customer_name=customer_name[:500],
+        product_name=product_name[:500],
+        product_number=product_number[:80],
+        extraction_summary=summary[:400],
+    )
+
+
+def llm_router_json_to_plan(
+    raw_prompt: str,
+    llm: LLMRouterJSON,
+    *,
+    heuristic_override: bool = False,
+    heuristic_log: str = "",
+) -> "Plan":
     """Build Plan from LLM output; re-uses regex helpers for price/code from raw prompt."""
     from planner import (
         Plan,
@@ -238,11 +435,13 @@ def llm_router_json_to_plan(raw_prompt: str, llm: LLMRouterJSON) -> "Plan":
     snippet = re.sub(r"\s+", " ", raw_prompt.strip())[:120]
     hint_em = int(bool(_extract_email(raw_prompt)))
     hint_ph = int(bool(_extract_phone(raw_prompt)))
+    ov = "1" if heuristic_override else "0"
     detail = (
-        f"llm:workflow={wf}|lang={llm.language}|conf={llm.confidence:.2f}|"
+        f"llm:workflow={wf}|ov={ov}|lang={llm.language}|conf={llm.confidence:.2f}|"
         f"i={intent}|em={hint_em}|ph={hint_ph}|"
-        f"{(llm.extraction_summary or '')[:180]}"
+        f"{(llm.extraction_summary or '')[:160]}"
     )
+    status = "ok_heuristic_override" if heuristic_override else "ok"
     hints = [
         "Planner LLM router (Spor B).",
         f"workflow={wf!r}",
@@ -275,15 +474,16 @@ def llm_router_json_to_plan(raw_prompt: str, llm: LLMRouterJSON) -> "Plan":
         planner_selected_entity=target,
         planner_confidence=llm.confidence,
         planner_language=llm.language or None,
-        planner_llm_status="ok",
+        planner_llm_status=status,
         planner_route_detail=detail[:500],
+        planner_heuristic_log=heuristic_log[:500],
     )
 
 
 def try_llm_plan_after_noop_with_detail(raw_prompt: str) -> tuple[Plan | None, str]:
     """
     If LLM enabled and rules returned noop, try LLM.
-    Returns (Plan, \"ok\") on success, or (None, reason) for logging / safe fallback.
+    Returns (Plan, \"ok\" | \"ok_heuristic_override\") on success, or (None, reason) for logging / safe fallback.
     """
     if not llm_router_enabled():
         return None, "llm_disabled"
@@ -293,6 +493,18 @@ def try_llm_plan_after_noop_with_detail(raw_prompt: str) -> tuple[Plan | None, s
     if llm.confidence < _LLM_CONFIDENCE_MIN:
         return None, f"low_confidence:{llm.confidence:.2f}"
     if llm.workflow == "noop":
+        hw = heuristic_green_workflow_after_llm_noop(raw_prompt)
+        if hw is not None:
+            wf, reason, conf, compact = hw
+            synth = _synthetic_llm_from_heuristic(raw_prompt, wf, reason, conf, compact)
+            log_line = f"override_noop->{wf}|{reason}|{compact}"
+            plan = llm_router_json_to_plan(
+                raw_prompt,
+                synth,
+                heuristic_override=True,
+                heuristic_log=log_line,
+            )
+            return plan, "ok_heuristic_override"
         return None, "llm_chose_noop"
     return llm_router_json_to_plan(raw_prompt, llm), "ok"
 

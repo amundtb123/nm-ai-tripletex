@@ -526,6 +526,7 @@ class Plan(BaseModel):
     planner_language: Optional[str] = None
     planner_llm_status: Optional[str] = None
     planner_route_detail: str = ""
+    planner_heuristic_log: str = ""
 
 
 def build_plan_rules(prompt: str) -> Plan:
@@ -661,6 +662,7 @@ def build_plan_rules(prompt: str) -> Plan:
         planner_language=None,
         planner_llm_status=None,
         planner_route_detail=route_detail[:500] if route_detail else "",
+        planner_heuristic_log="",
     )
 
 

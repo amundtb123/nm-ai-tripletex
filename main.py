@@ -153,6 +153,7 @@ def solve(body: SolveRequestBody) -> dict[str, str]:
             planner_language=plan.planner_language,
             planner_llm_status=plan.planner_llm_status,
             planner_route_detail=plan.planner_route_detail,
+            planner_heuristic_log=plan.planner_heuristic_log,
             has_customer_name=bool(plan.customer_name),
             has_entity_name=bool(plan.name),
             has_product_name=bool(plan.product_name),

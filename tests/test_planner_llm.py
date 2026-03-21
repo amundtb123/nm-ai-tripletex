@@ -10,6 +10,7 @@ from planner import build_plan, build_plan_rules
 from planner_llm import (
     LLMRouterJSON,
     build_llm_router_user_content,
+    heuristic_green_workflow_after_llm_noop,
     llm_router_json_to_plan,
     try_llm_plan_after_noop_with_detail,
 )
@@ -27,7 +28,7 @@ class TestBuildLlmRouterUserContent(unittest.TestCase):
     def test_hints_include_customer_terms(self) -> None:
         body = build_llm_router_user_content("Finn kunden Acme for meg")
         self.assertIn("mentions_customer_terms: True", body)
-        self.assertIn("mentions_find_or_list_verbs: True", body)
+        self.assertIn("mentions_find_verbs: True", body)
 
 
 class TestPlannerLLMMapping(unittest.TestCase):
@@ -100,6 +101,62 @@ class TestPlannerLLMFallback(unittest.TestCase):
                 p, d = try_llm_plan_after_noop_with_detail("something vague")
         self.assertIsNone(p)
         self.assertEqual(d, "llm_chose_noop")
+
+    @patch("planner_llm.call_llm_router")
+    def test_noop_overridden_by_heuristic_contact_card(self, mock_llm: MagicMock) -> None:
+        mock_llm.return_value = LLMRouterJSON(
+            workflow="noop",
+            confidence=0.99,
+            language="unknown",
+            extraction_summary="model noop",
+        )
+        prompt = "Please add: x@company.test and phone +47 22 33 44 55 for the new entry"
+        with patch.dict(os.environ, {"LLM_PLANNER_ENABLED": "1", "OPENAI_API_KEY": "sk-test"}):
+            p, d = try_llm_plan_after_noop_with_detail(prompt)
+        self.assertIsNotNone(p)
+        self.assertEqual(d, "ok_heuristic_override")
+        self.assertEqual(p.workflow, "create_customer")
+        self.assertEqual(p.planner_llm_status, "ok_heuristic_override")
+        self.assertIn("override_noop->create_customer", p.planner_heuristic_log)
+
+    @patch("planner_llm.call_llm_router")
+    def test_noop_stays_on_payment_prompt(self, mock_llm: MagicMock) -> None:
+        mock_llm.return_value = LLMRouterJSON(
+            workflow="noop",
+            confidence=0.99,
+            language="no",
+            extraction_summary="x",
+        )
+        with patch.dict(os.environ, {"LLM_PLANNER_ENABLED": "1", "OPENAI_API_KEY": "sk-test"}):
+            p, d = try_llm_plan_after_noop_with_detail("Registrer betaling på faktura 1234")
+        self.assertIsNone(p)
+        self.assertEqual(d, "llm_chose_noop")
+
+
+class TestHeuristicScores(unittest.TestCase):
+    def test_finn_kunden_prefers_search_customer(self) -> None:
+        h = heuristic_green_workflow_after_llm_noop("Finn kunden Acme AS for meg")
+        self.assertIsNotNone(h)
+        self.assertEqual(h[0], "search_customer")
+
+    def test_list_staff_prefers_employees(self) -> None:
+        h = heuristic_green_workflow_after_llm_noop("Show me all staff members who work here")
+        self.assertIsNotNone(h)
+        self.assertEqual(h[0], "list_employees")
+
+    def test_create_product_natural(self) -> None:
+        h = heuristic_green_workflow_after_llm_noop("We need to add a new product Coffee beans to the catalog")
+        self.assertIsNotNone(h)
+        self.assertEqual(h[0], "create_product")
+
+    def test_search_product_with_code(self) -> None:
+        h = heuristic_green_workflow_after_llm_noop("Look up product varenummer 9001")
+        self.assertIsNotNone(h)
+        self.assertEqual(h[0], "search_product")
+
+    def test_ambiguous_low_score_returns_none(self) -> None:
+        h = heuristic_green_workflow_after_llm_noop("ok thanks")
+        self.assertIsNone(h)
 
 
 class TestBuildPlanIntegration(unittest.TestCase):
