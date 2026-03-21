@@ -620,6 +620,7 @@ def _score_green_workflows(raw_prompt: str) -> dict[str, float]:
         and (has_em or has_ph)
         and not s["mentions_product_terms"]
         and not s["mentions_find_verbs"]
+        and s["mentions_customer_terms"]
     ):
         scores["create_customer"] += 4.0
     if intent == "create" and s["mentions_customer_terms"]:
@@ -635,6 +636,21 @@ def _score_green_workflows(raw_prompt: str) -> dict[str, float]:
         scores["search_customer"] += 3.0
     if s.get("mentions_existing_customer_cue") and s["mentions_customer_terms"]:
         scores["search_customer"] += 5.0
+
+    # Phone/email without explicit customer/product/staff words (NM: contact-only lines).
+    # Prefer search_* when unsure; create only when clear create/register verbs (matches router system prompt).
+    if (
+        (has_em or has_ph)
+        and not s["mentions_customer_terms"]
+        and not s["mentions_product_terms"]
+        and not s["mentions_employee_terms"]
+    ):
+        if s["mentions_find_verbs"] or s["mentions_list_or_show_verbs"]:
+            scores["search_customer"] += 6.5
+        elif s["mentions_create_or_add_verbs"]:
+            scores["create_customer"] += 6.0
+        else:
+            scores["search_customer"] += 5.0
 
     if scores["search_customer"] > 0 and scores["create_customer"] > 0:
         if s["mentions_create_or_add_verbs"] and not s["mentions_find_verbs"]:
