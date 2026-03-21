@@ -81,6 +81,11 @@ _WORKFLOW_RULES: tuple[tuple[WorkflowKind, tuple[str, ...]], ...] = (
             "kundeoppslag",
             "finn kunden",
             "søk etter kunde",
+            "sjekk kunden",
+            "sjekk kunde",
+            "finn firmaet",
+            "finn firma",
+            "søk firma",
         ),
     ),
     ("update_customer", ("update customer", "oppdater kunde")),
@@ -343,12 +348,13 @@ def _list_employees_fallback_tokens(prompt: str) -> tuple[str, str] | None:
 
 
 # create_customer: natural prompts split "create" / "new" and "customer" / "kunde"
+# Include kunden/kundene (not matched by \bkunde\b) and NO/SE firm words — NM uses long natural phrasing.
 _CREATE_CUSTOMER_ENTITY_RE = re.compile(
-    r"\b(customers?|client|clients|kunde|kunder)\b",
+    r"\b(customers?|client|clients|kunde|kunden|kundene|kunder|kundekort|firma|firmaet|bedrift|bedriften)\b",
     re.IGNORECASE,
 )
 _CREATE_CUSTOMER_VERB_RE = re.compile(
-    r"\b(create|add|register|new|opprett)\b",
+    r"((?:\b(?:create|add|register|new|opprett)\b|legg\s+til))",
     re.IGNORECASE,
 )
 
@@ -400,7 +406,7 @@ def _create_customer_fallback_tail(prompt: str) -> str:
 
 # search_* fallbacks: search/find/list/… — create_* runs after search_* in fallback order
 _SEARCH_VERB_RE = re.compile(
-    r"\b(search|find|finn|finne|søk|lookup|locate|list|fetch|retrieve)\b",
+    r"((?:\b(?:search|find|finn|finne|søk|lookup|locate|list|fetch|retrieve|sjekk|sjekke|bekreft)\b|slå\s+opp))",
     re.IGNORECASE,
 )
 
