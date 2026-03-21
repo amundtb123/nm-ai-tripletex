@@ -44,6 +44,8 @@ _HEURISTIC_AMBIGUITY_GAP_RELAXED = 0.30
 _HEURISTIC_SECOND_STRONG_MIN_RELAXED = 2.58
 # Third pass: only when _weak_green_recall_eligible (OOS false, blocked false, weak consistent signals).
 _HEURISTIC_MIN_SCORE_WEAK = 1.72
+# Slightly lower when HTTP files are present: NM often prepends «vedlegg» lines; scores still guarded.
+_HEURISTIC_MIN_SCORE_WEAK_ATTACHED = 1.62
 _HEURISTIC_AMBIGUITY_GAP_WEAK = 0.22
 _HEURISTIC_SECOND_STRONG_MIN_WEAK = 2.35
 
@@ -142,6 +144,8 @@ Allowed workflows (green scope only):
 - search_product — find or check an EXISTING product: price, stock, article/SKU, «på lager», «hva koster».
 - create_product — add a NEW product to the catalog (opprett/nytt produkt with article data).
 - noop — ONLY when the task is clearly NOT about employees, customers, or products in this system (e.g. invoice creation, payment registration, unrelated chat). Choosing noop for a plausible employee/customer/product request is a routing ERROR.
+
+The HTTP request may include attached files; file bytes are NOT shown to you. Route ONLY from the text. The JSON field attachments_count is metadata only — it does not add or remove task scope. Do NOT choose noop solely because attachments_count > 0 or the text mentions an attachment, «vedlegg», or «invoice attached» when the actual task is still a CRM/catalog/employee lookup.
 
 Out-of-scope (always noop — do NOT map to green even if customer/product/email/price appear):
 - Invoice/payment workflows: disputes, reminders, overdue, fees, KID, «faktura til kunde» as a billing task, registering payment.
@@ -338,14 +342,90 @@ def _standalone_green_request(raw_prompt: str) -> bool:
     return False
 
 
+def _billing_invoice_primary_task(raw_prompt: str) -> bool:
+    """
+    True when the user is primarily asking for invoice/payment/billing-document work.
+    Incidental words like «invoice» in «invoice attached» must NOT set this when the ask is CRM/catalog.
+    """
+    low = raw_prompt.lower()
+    if re.search(
+        r"\b(opprett\s+faktura|create\s+invoice|ny\s+faktura|new\s+invoice|registrer\s+betaling|register\s+payment|"
+        r"betal\s+faktura|invoice\s+payment|payment\s+on\s+invoice|betaling\s+på\s+faktura)\b",
+        low,
+    ):
+        return True
+    if re.search(
+        r"\b(feil|wrong|dispute|purring|forfalt|overdue|reminder|inkasso|collection)\b",
+        low,
+    ) and re.search(r"\b(faktura|invoice)\b", low):
+        return True
+    if re.search(r"\b(ubetalt|unpaid|utestående|past\s+due|overdue)\b", low) and re.search(
+        r"\b(faktura|invoice)\b", low
+    ):
+        return True
+    # Find/search the invoice document (tight window — not «look up customer …, invoice attached»).
+    if re.search(
+        r"\b(find|search|søk|finn|look\s+up|locate)\s+.{0,16}?\b(?:the\s+)?(invoice|faktura)\b",
+        low,
+    ):
+        return True
+    if re.search(
+        r"\b(invoice|faktura)\s+.{0,16}?\b(find|search|lookup|søk|finn)\b",
+        low,
+    ):
+        return True
+    return False
+
+
+def _strip_leading_attachment_boilerplate(raw_prompt: str) -> str:
+    """
+    Drop short leading lines that only reference attachments (NM / Cloud Run prompts).
+    Does not read file bytes. Used for scoring / router signals only — guardrails use full text.
+    """
+    lines = raw_prompt.strip().splitlines()
+    if not lines:
+        return raw_prompt.strip()
+    i = 0
+    billing_re = re.compile(
+        r"\b(opprett|create|registrer|register|betaling|payment|faktura|invoice|payroll|lønn|prosjekt|project|"
+        r"måneds|monthly\s+close|accrual|period\s+close|reversal|reversering|avslutning|ubetalt|dispute)\b",
+        re.I,
+    )
+    attach_start = re.compile(r"^\s*(?:vedlegg|attachment|attached)\b", re.I)
+    attach_phrase = re.compile(
+        r"^\s*(?:see\s+attached|please\s+refer|see\s+below|per\s+vedlegg|refer\s+to\s+the\s+attachment)\b",
+        re.I,
+    )
+    crm_hint = re.compile(
+        r"\b(customer|kunde|produkt|product|ansatt|employee|staff|finn|søk|find|price|stock|lager|pris|who|hvem|"
+        r"liste|list|fetch|retrieve|bolt|sku|vare)\b",
+        re.I,
+    )
+    while i < len(lines) and i < 4:
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+        if billing_re.search(line):
+            break
+        if attach_start.match(line) or attach_phrase.match(line):
+            i += 1
+            continue
+        if len(line) < 130 and re.search(r"\b(vedlegg|attachment|attached)\b", line, re.I) and not crm_hint.search(
+            line
+        ):
+            i += 1
+            continue
+        break
+    return "\n".join(lines[i:]).strip() or raw_prompt.strip()
+
+
 def _non_green_accounting_context(raw_prompt: str) -> bool:
     """Invoice/payment/project/payroll/period-close — green workflows are not in scope (unless standalone)."""
     from planner import _classify_intent
 
     low = raw_prompt.lower()
-    intent = _classify_intent(raw_prompt)
-    if intent in ("invoice", "payment"):
-        return True
+    # Structural OOS (before standalone CRM exemption)
     if re.search(r"\b(prosjekt|project)\b", low) and re.search(
         r"\b(kunde|customer|client|koble|link|for\s+customer|til\s+kunde|linked)\b",
         low,
@@ -368,6 +448,14 @@ def _non_green_accounting_context(raw_prompt: str) -> bool:
         r"late\s+fee|pålagt\s+gebyr|reminder\s+fee|service\s+fee)\b",
         low,
     ) and re.search(r"\b(faktura|invoice|betaling|payment)\b", low):
+        return True
+    # Clear CRM/catalog/employee ask: do not treat bare «invoice»/«payment» substrings as OOS
+    # (e.g. «invoice attached» in boilerplate) unless billing is the primary task.
+    if _standalone_green_request(raw_prompt) and not _billing_invoice_primary_task(raw_prompt):
+        return False
+
+    intent = _classify_intent(raw_prompt)
+    if intent in ("invoice", "payment"):
         return True
     return False
 
@@ -395,8 +483,9 @@ def _weak_green_recall_eligible(raw_prompt: str) -> bool:
         return False
     if _heuristic_relax_eligible(raw_prompt):
         return True
-    low = raw_prompt.lower()
-    s = collect_router_signals(raw_prompt)
+    effective = _strip_leading_attachment_boilerplate(raw_prompt)
+    low = effective.lower()
+    s = collect_router_signals(effective)
     if s.get("mentions_staff_in_company"):
         return True
     if s["mentions_employee_terms"] and (
@@ -454,11 +543,15 @@ def _score_green_workflows(raw_prompt: str) -> dict[str, float]:
 
     from planner import _classify_intent, _extract_email, _extract_phone, _extract_product_code
 
-    s = collect_router_signals(raw_prompt)
-    low = raw_prompt.lower()
-    intent = _classify_intent(raw_prompt)
-    has_em = s["has_email_in_text"]
-    has_ph = s["has_phone_in_text"]
+    effective = _strip_leading_attachment_boilerplate(raw_prompt)
+    if not effective.strip():
+        effective = raw_prompt.strip()
+
+    s = collect_router_signals(effective)
+    low = effective.lower()
+    intent = _classify_intent(effective)
+    has_em = bool(_extract_email(raw_prompt))
+    has_ph = bool(_extract_phone(raw_prompt))
     pcode = _extract_product_code(raw_prompt)
 
     scores = {w: 0.0 for w in GREEN_WORKFLOWS}
@@ -554,6 +647,7 @@ def heuristic_green_workflow_after_llm_noop(
     *,
     relaxed: bool = False,
     weak: bool = False,
+    file_count: int = 0,
 ) -> tuple[str, str, float, str] | None:
     """
     When the LLM returned noop (or low confidence), pick a green workflow from deterministic scores.
@@ -572,7 +666,9 @@ def heuristic_green_workflow_after_llm_noop(
     compact = "|".join(f"{k.split('_')[0][:2]}={v:.1f}" for k, v in sorted(scores.items(), key=lambda x: -x[1]))
 
     if weak:
-        min_score = _HEURISTIC_MIN_SCORE_WEAK
+        min_score = (
+            _HEURISTIC_MIN_SCORE_WEAK_ATTACHED if file_count > 0 else _HEURISTIC_MIN_SCORE_WEAK
+        )
         amb_gap = _HEURISTIC_AMBIGUITY_GAP_WEAK
         second_min = _HEURISTIC_SECOND_STRONG_MIN_WEAK
         tag = "weak"
@@ -582,7 +678,9 @@ def heuristic_green_workflow_after_llm_noop(
         second_min = _HEURISTIC_SECOND_STRONG_MIN_RELAXED
         tag = "relaxed"
     else:
-        min_score = _HEURISTIC_MIN_SCORE_STANDALONE if _standalone_green_request(raw_prompt) else _HEURISTIC_MIN_SCORE
+        stripped = _strip_leading_attachment_boilerplate(raw_prompt)
+        standalone_like = _standalone_green_request(raw_prompt) or _standalone_green_request(stripped)
+        min_score = _HEURISTIC_MIN_SCORE_STANDALONE if standalone_like else _HEURISTIC_MIN_SCORE
         amb_gap = _HEURISTIC_AMBIGUITY_GAP
         second_min = _HEURISTIC_SECOND_STRONG_MIN
         tag = "standard"
@@ -597,17 +695,25 @@ def heuristic_green_workflow_after_llm_noop(
     return (best_wf, reason, conf, compact[:400])
 
 
-def heuristic_green_workflow_after_llm_noop_two_pass(raw_prompt: str) -> tuple[str, str, float, str] | None:
+def heuristic_green_workflow_after_llm_noop_two_pass(
+    raw_prompt: str, file_count: int = 0
+) -> tuple[str, str, float, str] | None:
     """Standard → relaxed (standalone) → weak (consistent weak-green cues, still guarded)."""
-    h = heuristic_green_workflow_after_llm_noop(raw_prompt, relaxed=False, weak=False)
+    h = heuristic_green_workflow_after_llm_noop(
+        raw_prompt, relaxed=False, weak=False, file_count=file_count
+    )
     if h is not None:
         return h
     if _heuristic_relax_eligible(raw_prompt):
-        h = heuristic_green_workflow_after_llm_noop(raw_prompt, relaxed=True, weak=False)
+        h = heuristic_green_workflow_after_llm_noop(
+            raw_prompt, relaxed=True, weak=False, file_count=file_count
+        )
         if h is not None:
             return h
     if _weak_green_recall_eligible(raw_prompt):
-        return heuristic_green_workflow_after_llm_noop(raw_prompt, relaxed=False, weak=True)
+        return heuristic_green_workflow_after_llm_noop(
+            raw_prompt, relaxed=False, weak=True, file_count=file_count
+        )
     return None
 
 
@@ -631,20 +737,27 @@ def _router_identifying_price_stock(raw_prompt: str) -> tuple[bool, bool]:
     return price, stock
 
 
-def build_llm_router_user_content(raw_prompt: str) -> str:
+def build_llm_router_user_content(raw_prompt: str, file_count: int = 0) -> str:
     """Structured original prompt + machine-readable signals + heuristic ranking (not a command to the model)."""
-    s = collect_router_signals(raw_prompt)
+    from planner import _extract_email, _extract_phone, _extract_product_code
+
+    effective = _strip_leading_attachment_boilerplate(raw_prompt)
+    s = collect_router_signals(effective)
     scores = _score_green_workflows(raw_prompt)
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     top_wf, top_score = ranked[0] if ranked else ("noop", 0.0)
     second_score = ranked[1][1] if len(ranked) > 1 else 0.0
-    id_price, id_stock = _router_identifying_price_stock(raw_prompt)
+    id_price, id_stock = _router_identifying_price_stock(effective)
 
+    has_em_f = bool(_extract_email(raw_prompt))
+    has_ph_f = bool(_extract_phone(raw_prompt))
     entity_customer = bool(
         s["mentions_customer_terms"]
-        or (s["has_email_in_text"] or s["has_phone_in_text"])
-        and not s["mentions_product_terms"]
-        and not s["mentions_employee_terms"]
+        or (
+            (has_em_f or has_ph_f)
+            and not s["mentions_product_terms"]
+            and not s["mentions_employee_terms"]
+        )
     )
     entity_product = bool(s["mentions_product_terms"] or s["mentions_price_or_stock_lookup"])
     entity_employees = bool(s["mentions_employee_terms"] or s["mentions_staff_in_company"])
@@ -660,9 +773,17 @@ def build_llm_router_user_content(raw_prompt: str) -> str:
     sg = _standalone_green_request(raw_prompt)
     ng = _non_green_accounting_context(raw_prompt)
 
+    fc = max(0, int(file_count))
     return (
         "[router_input]\n"
         f"original_prompt: {raw_prompt.strip()}\n"
+        f"attachments_count: {fc}\n"
+        "\n"
+        "routing_note:\n"
+        "  attachments_count is metadata only (file bytes are not visible here). It does not mean\n"
+        "  'no task' or 'out of scope'. Route from the TEXT; do not choose noop solely because\n"
+        "  attachments_count > 0 or the text mentions vedlegg / attachment when the task is still\n"
+        "  CRM / catalog / employees.\n"
         "\n"
         "router_guardrails:\n"
         f"  standalone_green_likely: {sg}\n"
@@ -680,11 +801,11 @@ def build_llm_router_user_content(raw_prompt: str) -> str:
         f"  lookup_existence_or_details: {action_exists}\n"
         "\n"
         "identifying_details:\n"
-        f"  email_in_text: {s['has_email_in_text']}\n"
-        f"  phone_in_text: {s['has_phone_in_text']}\n"
+        f"  email_in_text: {bool(_extract_email(raw_prompt))}\n"
+        f"  phone_in_text: {bool(_extract_phone(raw_prompt))}\n"
         f"  price_question: {id_price}\n"
         f"  stock_question: {id_stock}\n"
-        f"  product_code_in_text: {s['has_product_code_in_text']}\n"
+        f"  product_code_in_text: {bool(_extract_product_code(raw_prompt))}\n"
         "\n"
         f"coarse_intent_classifier: {coarse}\n"
         "\n"
@@ -700,9 +821,9 @@ def build_llm_router_user_content(raw_prompt: str) -> str:
     )
 
 
-def call_llm_router(prompt: str) -> LLMRouterJSON | None:
+def call_llm_router(prompt: str, file_count: int = 0) -> LLMRouterJSON | None:
     """Call remote LLM; return parsed model or None on failure."""
-    user_content = build_llm_router_user_content(prompt)
+    user_content = build_llm_router_user_content(prompt, file_count=file_count)
     raw = _openai_chat_json(_SYSTEM_PROMPT, user_content)
     if raw is None:
         return None
@@ -864,14 +985,14 @@ def llm_router_json_to_plan(
     )
 
 
-def try_llm_plan_after_noop_with_detail(raw_prompt: str) -> tuple[Plan | None, str]:
+def try_llm_plan_after_noop_with_detail(raw_prompt: str, file_count: int = 0) -> tuple[Plan | None, str]:
     """
     If LLM enabled and rules returned noop, try LLM.
     Returns (Plan, \"ok\" | \"ok_heuristic_override\") on success, or (None, reason) for logging / safe fallback.
     """
     if not llm_router_enabled():
         return None, "llm_disabled"
-    llm = call_llm_router(raw_prompt)
+    llm = call_llm_router(raw_prompt, file_count=file_count)
     if llm is None:
         return None, "llm_invalid_response"
 
@@ -888,7 +1009,7 @@ def try_llm_plan_after_noop_with_detail(raw_prompt: str) -> tuple[Plan | None, s
         )
 
     def _plan_from_heuristic_override() -> tuple[Plan, str] | None:
-        hw = heuristic_green_workflow_after_llm_noop_two_pass(raw_prompt)
+        hw = heuristic_green_workflow_after_llm_noop_two_pass(raw_prompt, file_count=file_count)
         if hw is None:
             return None
         wf, reason, conf, compact = hw
@@ -929,7 +1050,7 @@ def try_llm_plan_after_noop_with_detail(raw_prompt: str) -> tuple[Plan | None, s
     return llm_router_json_to_plan(raw_prompt, llm), "ok"
 
 
-def try_llm_plan_after_noop(raw_prompt: str) -> Plan | None:
+def try_llm_plan_after_noop(raw_prompt: str, file_count: int = 0) -> Plan | None:
     """Thin wrapper; use :func:`try_llm_plan_after_noop_with_detail` when logging the reason."""
-    plan, _ = try_llm_plan_after_noop_with_detail(raw_prompt)
+    plan, _ = try_llm_plan_after_noop_with_detail(raw_prompt, file_count=file_count)
     return plan

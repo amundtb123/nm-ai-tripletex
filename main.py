@@ -203,7 +203,7 @@ def solve(body: SolveRequestBody) -> dict[str, str]:
                 count=0,
             )
 
-        plan = build_plan(body.prompt)
+        plan = build_plan(body.prompt, file_count=len(body.files))
         has_invoice_number_hint = bool(extract_invoice_number(body.prompt))
 
         log_structured(

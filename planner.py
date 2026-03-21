@@ -400,7 +400,7 @@ def _create_customer_fallback_tail(prompt: str) -> str:
 
 # search_* fallbacks: search/find/list/… — create_* runs after search_* in fallback order
 _SEARCH_VERB_RE = re.compile(
-    r"\b(search|find|finn|finne|søk|lookup|locate|list)\b",
+    r"\b(search|find|finn|finne|søk|lookup|locate|list|fetch|retrieve)\b",
     re.IGNORECASE,
 )
 
@@ -739,14 +739,14 @@ def _noop_plan_with_llm_detail(plan: Plan, detail: str) -> Plan:
     )
 
 
-def build_plan(prompt: str) -> Plan:
+def build_plan(prompt: str, file_count: int = 0) -> Plan:
     """Rules + regex first; if ``noop``, optionally call LLM router (env-gated)."""
     plan = build_plan_rules(prompt)
     if plan.workflow != "noop":
         return plan
     from planner_llm import try_llm_plan_after_noop_with_detail
 
-    alt, detail = try_llm_plan_after_noop_with_detail(prompt)
+    alt, detail = try_llm_plan_after_noop_with_detail(prompt, file_count=file_count)
     if alt is not None:
         return alt
     return _noop_plan_with_llm_detail(plan, detail)

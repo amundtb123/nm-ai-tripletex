@@ -86,6 +86,12 @@ class TestBuildLlmRouterUserContent(unittest.TestCase):
         self.assertIn("create_or_register: True", body)
         self.assertIn("  customer: True", body)
 
+    def test_attachments_count_and_routing_note(self) -> None:
+        body = build_llm_router_user_content("Finn kunden Acme", file_count=1)
+        self.assertIn("attachments_count: 1", body)
+        self.assertIn("routing_note:", body)
+        self.assertIn("attachments_count: 0", build_llm_router_user_content("x"))
+
 
 class TestLLMRouterJSONSchema(unittest.TestCase):
     def test_minimal_json_defaults_entity_and_reason(self) -> None:
