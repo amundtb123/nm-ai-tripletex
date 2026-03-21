@@ -146,7 +146,8 @@ class TestPlannerLLMFallback(unittest.TestCase):
         self.assertIsNone(p)
         self.assertEqual(d, "llm_disabled")
 
-    def test_low_confidence_returns_reason(self) -> None:
+    def test_noop_under_confidence_threshold_is_llm_chose_noop_not_low_confidence_label(self) -> None:
+        """noop + conf < min after heuristics: label llm_chose_noop (not low_confidence:0.00)."""
         llm = LLMRouterJSON(
             workflow="noop",
             confidence=0.1,
@@ -159,7 +160,7 @@ class TestPlannerLLMFallback(unittest.TestCase):
                     "asdfghjkl totally random text with no routing signals at all"
                 )
         self.assertIsNone(p)
-        self.assertTrue(d.startswith("low_confidence:"))
+        self.assertEqual(d, "llm_chose_noop")
 
     @patch("planner_llm.heuristic_green_workflow_after_llm_noop", return_value=None)
     def test_low_confidence_green_workflow_still_used(self, _mock_h: MagicMock) -> None:

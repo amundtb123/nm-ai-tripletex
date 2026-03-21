@@ -5,7 +5,10 @@ from __future__ import annotations
 import unittest
 
 from planner import build_plan_rules
-from planner_llm import _heuristic_blocked, heuristic_green_workflow_after_llm_noop
+from planner_llm import (
+    _heuristic_blocked,
+    heuristic_green_workflow_after_llm_noop_two_pass,
+)
 
 
 class TestExactTriggersNorwegian(unittest.TestCase):
@@ -45,12 +48,11 @@ class TestFallbackNorwegian(unittest.TestCase):
 
 
 class TestHeuristicUnblock(unittest.TestCase):
-    def test_finn_kunde_with_faktura_word_not_blocked(self) -> None:
+    def test_finn_kunde_invoice_context_blocked_for_heuristic(self) -> None:
+        """Faktura/invoice-intent wins over «finn kunde» substring — no green heuristic override."""
         prompt = "Finn kunde som har ubetalt faktura fra i fjor"
-        self.assertFalse(_heuristic_blocked(prompt))
-        h = heuristic_green_workflow_after_llm_noop(prompt)
-        self.assertIsNotNone(h)
-        self.assertEqual(h[0], "search_customer")
+        self.assertTrue(_heuristic_blocked(prompt))
+        self.assertIsNone(heuristic_green_workflow_after_llm_noop_two_pass(prompt))
 
     def test_payment_still_blocked(self) -> None:
         self.assertTrue(_heuristic_blocked("Registrer betaling på faktura 1234"))

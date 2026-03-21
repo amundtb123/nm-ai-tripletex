@@ -34,9 +34,14 @@ _LLM_CONFIDENCE_MIN = 0.45
 _HEURISTIC_MIN_SCORE = 2.85
 # When the prompt is a clear standalone CRM/product/employee task, allow a slightly lower bar for override.
 _HEURISTIC_MIN_SCORE_STANDALONE = 2.48
+# Second pass when standard+standalone thresholds still fail but relax_eligible (not OOS).
+_HEURISTIC_MIN_SCORE_RELAXED = 2.10
 _HEURISTIC_AMBIGUITY_GAP = 0.48
 # Only treat as ambiguous when the runner-up is also quite strong (both workflows plausible).
 _HEURISTIC_SECOND_STRONG_MIN = 3.15
+# Relaxed ambiguity: smaller gap → fewer "tie" rejections; lower bar for runner-up being "strong".
+_HEURISTIC_AMBIGUITY_GAP_RELAXED = 0.30
+_HEURISTIC_SECOND_STRONG_MIN_RELAXED = 2.58
 
 
 class LLMRouterJSON(BaseModel):
@@ -283,8 +288,9 @@ def _standalone_green_request(raw_prompt: str) -> bool:
     ):
         return True
     if re.search(
-        r"\b(finn|søk|finne|look\s+up|search|vis\s+alle|liste|oversikt|hent)\s+.{0,48}?"
-        r"\b(kunde|kunden|kunder|kundene|vare|varen|varer|produkt|produkter|produktet|artikkel|"
+        r"\b(finn|søk|finne|look\s+up|search|locate|vis\s+alle|liste|oversikt|hent)\s+.{0,48}?"
+        r"\b(kunde|kunden|kunder|kundene|customer|customers|client|clients|"
+        r"vare|varen|varer|produkt|produkter|produktet|artikkel|"
         r"ansatte?|medarbeider|medarbeidere|employee|staff|kollegaer)\b",
         low,
     ):
@@ -347,13 +353,26 @@ def _non_green_accounting_context(raw_prompt: str) -> bool:
     return False
 
 
+def _heuristic_relax_eligible(raw_prompt: str) -> bool:
+    """
+    Safe to run a second, looser heuristic pass: standalone green task and not dominated by
+    invoice/payment/project/payroll/close signals (guardrails stay in effect via _heuristic_blocked).
+    """
+    if _non_green_accounting_context(raw_prompt):
+        return False
+    if _heuristic_blocked(raw_prompt):
+        return False
+    return _standalone_green_request(raw_prompt)
+
+
 def _heuristic_blocked(raw_prompt: str) -> bool:
     """Do not use green heuristics or accept LLM green when prompt is out of green scope."""
+    # Invoice/payment/project/payroll/close must win over broad «find customer» English matches.
+    if _non_green_accounting_context(raw_prompt):
+        return True
     if _standalone_green_request(raw_prompt):
         return False
     low = raw_prompt.lower()
-    if _non_green_accounting_context(raw_prompt):
-        return True
     if re.search(
         r"\b(registrer\s+betaling|register\s+payment|pay\s+invoice|betal\s+faktura|invoice\s+payment|payment\s+for\s+invoice)\b",
         low,
@@ -474,10 +493,14 @@ def _score_green_workflows(raw_prompt: str) -> dict[str, float]:
     return scores
 
 
-def heuristic_green_workflow_after_llm_noop(raw_prompt: str) -> tuple[str, str, float, str] | None:
+def heuristic_green_workflow_after_llm_noop(
+    raw_prompt: str,
+    *,
+    relaxed: bool = False,
+) -> tuple[str, str, float, str] | None:
     """
-    When the LLM returned noop, pick a green workflow from deterministic scores if confident enough.
-    Returns (workflow, reason, confidence, scores_compact) or None.
+    When the LLM returned noop (or low confidence), pick a green workflow from deterministic scores.
+    ``relaxed=True`` uses lower min score and looser ambiguity tie-break (only from second pass).
     """
     scores = _score_green_workflows(raw_prompt)
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
@@ -488,15 +511,35 @@ def heuristic_green_workflow_after_llm_noop(raw_prompt: str) -> tuple[str, str, 
 
     compact = "|".join(f"{k.split('_')[0][:2]}={v:.1f}" for k, v in sorted(scores.items(), key=lambda x: -x[1]))
 
-    min_score = _HEURISTIC_MIN_SCORE_STANDALONE if _standalone_green_request(raw_prompt) else _HEURISTIC_MIN_SCORE
+    if relaxed:
+        min_score = _HEURISTIC_MIN_SCORE_RELAXED
+        amb_gap = _HEURISTIC_AMBIGUITY_GAP_RELAXED
+        second_min = _HEURISTIC_SECOND_STRONG_MIN_RELAXED
+        tag = "relaxed"
+    else:
+        min_score = _HEURISTIC_MIN_SCORE_STANDALONE if _standalone_green_request(raw_prompt) else _HEURISTIC_MIN_SCORE
+        amb_gap = _HEURISTIC_AMBIGUITY_GAP
+        second_min = _HEURISTIC_SECOND_STRONG_MIN
+        tag = "standard"
+
     if best_s < min_score:
         return None
-    if best_s - second_s < _HEURISTIC_AMBIGUITY_GAP and second_s >= _HEURISTIC_SECOND_STRONG_MIN:
+    if best_s - second_s < amb_gap and second_s >= second_min:
         return None
 
     conf = min(0.74, 0.5 + best_s * 0.035)
-    reason = f"heuristic_scores winner={best_wf} best={best_s:.1f} second={second_s:.1f}"
+    reason = f"heuristic_scores winner={best_wf} best={best_s:.1f} second={second_s:.1f}|{tag}"
     return (best_wf, reason, conf, compact[:400])
+
+
+def heuristic_green_workflow_after_llm_noop_two_pass(raw_prompt: str) -> tuple[str, str, float, str] | None:
+    """Standard heuristic, then relaxed pass when eligible (standalone + not OOS)."""
+    h = heuristic_green_workflow_after_llm_noop(raw_prompt, relaxed=False)
+    if h is not None:
+        return h
+    if _heuristic_relax_eligible(raw_prompt):
+        return heuristic_green_workflow_after_llm_noop(raw_prompt, relaxed=True)
+    return None
 
 
 def _router_identifying_price_stock(raw_prompt: str) -> tuple[bool, bool]:
@@ -776,7 +819,7 @@ def try_llm_plan_after_noop_with_detail(raw_prompt: str) -> tuple[Plan | None, s
         )
 
     def _plan_from_heuristic_override() -> tuple[Plan, str] | None:
-        hw = heuristic_green_workflow_after_llm_noop(raw_prompt)
+        hw = heuristic_green_workflow_after_llm_noop_two_pass(raw_prompt)
         if hw is None:
             return None
         wf, reason, conf, compact = hw
@@ -806,8 +849,12 @@ def try_llm_plan_after_noop_with_detail(raw_prompt: str) -> tuple[Plan | None, s
         plan = plan.model_copy(update={"planner_llm_status": "ok_low_confidence_llm"})
         return plan, "ok_low_confidence_llm"
 
+    # noop + under threshold: heuristics already tried; do not label as low_confidence (misleading vs model noop).
     if llm.confidence < _LLM_CONFIDENCE_MIN:
+        if llm.workflow == "noop":
+            return None, "guardrail_rejected_llm_green" if guardrail_rejected_llm_green else "llm_chose_noop"
         return None, f"low_confidence:{llm.confidence:.2f}"
+
     if llm.workflow == "noop":
         return None, "guardrail_rejected_llm_green" if guardrail_rejected_llm_green else "llm_chose_noop"
     return llm_router_json_to_plan(raw_prompt, llm), "ok"
