@@ -125,8 +125,9 @@ Allowed workflows:
 
 Critical rules:
 - **Almost never choose noop** if the user is asking about employees, customers, or products in natural language (any language). Map to the closest workflow.
-- If **coarse_intent** is create or the text includes **email and/or phone** without a clear product focus → strongly prefer **create_customer** (contact registration).
-- If the user wants to **find / search / look up** a **customer** → **search_customer**.
+- If the user wants to **find / search / look up** an **existing** customer (including when email/phone appear as identifying details) → **search_customer**. Email/phone alone do **not** mean create.
+- **create_customer** when clearly registering a **new** customer (opprett/ny kunde/registrer/add …) without find/search intent.
+- If **coarse_intent** is create and the text is about **new** customer registration (not lookup) → **create_customer**.
 - If **product** + **find/search** → **search_product**; **product** + **create/add** → **create_product**.
 - **noop** is wrong for: contact details + company/person name, "add client", "new customer", "liste ansatte", "find product".
 
@@ -186,6 +187,13 @@ def collect_router_signals(raw_prompt: str) -> dict[str, Any]:
         )
     )
     mentions_who = bool(re.search(r"\b(who|whom|hvem|alle|all|everyone|everybody)\b", low))
+    mentions_existing_customer_cue = bool(
+        re.search(
+            r"\b(eksisterende|allerede|finnes|i\s+systemet|i\s+databasen|existing|fra\s+før|"
+            r"registrert|kundekort|kundenummer)\b",
+            low,
+        )
+    )
 
     return {
         "coarse_intent": intent,
@@ -199,6 +207,7 @@ def collect_router_signals(raw_prompt: str) -> dict[str, Any]:
         "mentions_list_or_show_verbs": mentions_list,
         "mentions_create_or_add_verbs": mentions_create,
         "mentions_who_or_all": mentions_who,
+        "mentions_existing_customer_cue": mentions_existing_customer_cue,
     }
 
 
@@ -270,11 +279,23 @@ def _score_green_workflows(raw_prompt: str) -> dict[str, float]:
 
     if s["mentions_customer_terms"] and s["mentions_create_or_add_verbs"]:
         scores["create_customer"] += 6.0
-    if (has_em or has_ph) and s["mentions_customer_terms"]:
+    # Contact blocks strongly suggest create only when not explicitly searching/looking up.
+    if (has_em or has_ph) and s["mentions_customer_terms"] and not s["mentions_find_verbs"]:
         scores["create_customer"] += 5.0
-    if has_em and has_ph and not s["mentions_product_terms"] and not s["mentions_employee_terms"]:
+    if (
+        has_em
+        and has_ph
+        and not s["mentions_product_terms"]
+        and not s["mentions_employee_terms"]
+        and not s["mentions_find_verbs"]
+    ):
         scores["create_customer"] += 5.5
-    if intent == "create" and (has_em or has_ph) and not s["mentions_product_terms"]:
+    if (
+        intent == "create"
+        and (has_em or has_ph)
+        and not s["mentions_product_terms"]
+        and not s["mentions_find_verbs"]
+    ):
         scores["create_customer"] += 4.0
     if intent == "create" and s["mentions_customer_terms"]:
         scores["create_customer"] += 3.0
@@ -287,6 +308,8 @@ def _score_green_workflows(raw_prompt: str) -> dict[str, float]:
             scores["search_customer"] += 2.0
     if s["mentions_customer_terms"] and intent == "search":
         scores["search_customer"] += 3.0
+    if s.get("mentions_existing_customer_cue") and s["mentions_customer_terms"]:
+        scores["search_customer"] += 5.0
 
     if scores["search_customer"] > 0 and scores["create_customer"] > 0:
         if s["mentions_create_or_add_verbs"] and not s["mentions_find_verbs"]:

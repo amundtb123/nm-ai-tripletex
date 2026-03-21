@@ -390,9 +390,9 @@ def _create_customer_fallback_tail(prompt: str) -> str:
     return _customer_name_fallback_tail(prompt)
 
 
-# search_* fallbacks: search/find/list/… — not create|add|… (those hit create_* first in order)
+# search_* fallbacks: search/find/list/… — create_* runs after search_* in fallback order
 _SEARCH_VERB_RE = re.compile(
-    r"\b(search|find|finn|søk|lookup|locate|list)\b",
+    r"\b(search|find|finn|finne|søk|lookup|locate|list)\b",
     re.IGNORECASE,
 )
 
@@ -487,8 +487,10 @@ def _select_workflow(
 
     route_kind: \"exact\" (substring trigger), \"fallback\" (word-based), or None (noop).
     route_detail: matched trigger phrase (exact) or \"verb=…|entity=…\" (fallback); empty for noop.
-    Fallback order after strict rules: list_employees → create_customer → search_customer →
+    Fallback order after strict rules: list_employees → search_customer → create_customer →
     search_product → create_product (each requires verb+entity regex matches; see helpers above).
+    **search_customer before create_customer** so «finn/søk kunde …» wins over «ny/opprett»-ord
+    when both patterns could match.
     """
     lower = prompt.lower()
     for kind, triggers in _WORKFLOW_RULES:
@@ -502,6 +504,15 @@ def _select_workflow(
     if toks:
         verb, ent = toks
         return "list_employees", "", "fallback", f"verb={verb}|entity={ent}"
+    toks_sc = _search_customer_fallback_tokens(prompt)
+    if toks_sc:
+        v, e = toks_sc
+        return (
+            "search_customer",
+            _customer_name_fallback_tail(prompt),
+            "fallback",
+            f"verb={v}|entity={e}",
+        )
     toks_cc = _create_customer_fallback_tokens(prompt)
     if toks_cc:
         verb_c, ent_c = toks_cc
@@ -511,15 +522,6 @@ def _select_workflow(
             tail_cc,
             "fallback",
             f"verb={verb_c}|entity={ent_c}",
-        )
-    toks_sc = _search_customer_fallback_tokens(prompt)
-    if toks_sc:
-        v, e = toks_sc
-        return (
-            "search_customer",
-            _customer_name_fallback_tail(prompt),
-            "fallback",
-            f"verb={v}|entity={e}",
         )
     toks_sp = _search_product_fallback_tokens(prompt)
     if toks_sp:
