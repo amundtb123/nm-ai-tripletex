@@ -44,6 +44,8 @@ If either value is still a placeholder or the URL is malformed, the app returns 
 - **`workflow`:** f.eks. `list_employees`, `search_customer`, … (innenfor første LLM-scope)
 - **`planner_confidence`**, **`planner_language`**, **`planner_route_detail`** (kort oppsummering — ingen hemmeligheter)
 
+**Unngå falsk negativ:** Hvis du ser **`planner_llm_status`:** **`llm_noop`** med **`detected_intent`:** **`create`** og **`has_phone`** / **`has_email`:** **true**, er det et tegn på at LLM burde ha valgt et grønt workflow — etter router-justering skal **`planner_route_detail`** ved suksess inneholde kompakt **`i=…|em=…|ph=…`** (hint-avledning) for feilsøking.
+
 **Eksempel — siste `plan_built` for en request** (tilpass prosjekt/region; JSON i logglinjen kan være `jsonPayload` eller rå tekst avhengig av oppsett):
 
 ```bash
@@ -61,7 +63,9 @@ Hvis du logger til stdout som ren JSON (som i appen), filtrer på `event=="plan_
 | Norsk | «Kan du vise meg hvem som jobber hos oss?» | `list_employees` |
 | Engelsk | «I need to look up an existing customer named Acme Ltd» | `search_customer` |
 | Norsk | «Registrer ny kunde Krokstrand AS» | `create_customer` |
+| Norsk | «Opprett kunde med navn Test AS, tlf 99 00 00 00» (naturlig, uten eksakt «opprett kunde»-frase) | `create_customer` via **`planner_mode`:** **`llm`** |
 | Engelsk | «Find our product by code 1001» | `search_product` |
+| Engelsk | «Please add a new client Jane Doe, phone +1 555 0100» | `create_customer` via LLM hvis regler ga **`noop`** |
 
 Juster navn/produkt til det som finnes i **din** sandbox. Prompts som **allerede** treffer eksakte fraser (f.eks. «list employees») gir **`planner_mode`:** **`exact_rule`** — da kalles **ikke** LLM.
 

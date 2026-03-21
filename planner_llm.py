@@ -100,31 +100,93 @@ def _openai_chat_json(system: str, user: str) -> dict[str, Any] | None:
         return None
 
 
-_SYSTEM_PROMPT = """You are a strict JSON router for an accounting assistant connected to Tripletex.
-Classify the user message into exactly one workflow and extract slots. Do NOT output API URLs, HTTP methods, or Tripletex paths.
+_SYSTEM_PROMPT = """You are a JSON router for an accounting assistant (Tripletex backend). Your job is to pick ONE workflow and extract slots. Do NOT output API URLs, HTTP methods, or Tripletex paths.
 
-Allowed workflows:
-- list_employees: user wants to see/list employees/staff/ansatte/medarbeidere.
-- search_customer: user wants to find/lookup an existing customer by name.
-- create_customer: user wants to register/create a new customer.
-- search_product: user wants to find/lookup a product.
-- create_product: user wants to create a new product.
-- noop: none of the above, or unclear/unsafe to route.
+Allowed workflows (only these):
+- list_employees: list/show/find who works at the company (employees, staff, ansatte, medarbeidere).
+- search_customer: find or look up an EXISTING customer/client (kunde) by name or identifier.
+- create_customer: register or add a NEW customer/client; often includes name, phone, email, address.
+- search_product: find or look up an EXISTING product/article (vare/produkt).
+- create_product: add a NEW product/article to the catalog.
+- noop: ONLY use when the message is clearly NOT about any of the above (e.g. unrelated topic, payment/invoice-only request, or empty noise). Do NOT choose noop just because wording is informal or multilingual.
 
-Rules:
-- Prefer noop if the request is ambiguous or not about these tasks.
-- Fill customer_name / product_name / product_number when applicable; otherwise empty strings.
-- language: short ISO-like hint (no, en, unknown, etc.).
-- extraction_summary: one short sentence why you chose this workflow (no secrets, no full email addresses).
-- confidence: 0.0–1.0 your confidence in workflow choice.
+Routing priorities (avoid unnecessary noop):
+- If the user wants to add/register a new customer (or gives contact details for a new client) → create_customer. Mention of phone, email, or "new customer" supports this.
+- If they want to find/search an existing customer → search_customer.
+- If they want to add a new product or article → create_product; if they want to find a product → search_product.
+- If they want a list of employees/staff → list_employees.
+- When in doubt between two of these five, prefer the workflow that matches the strongest cue (create vs search, customer vs product); use noop only when none of the five fit.
+
+Slots:
+- Fill customer_name / product_name / product_number when you can infer them from the text; otherwise empty strings.
+- language: short hint (no, en, da, sv, de, unknown, …).
+- extraction_summary: one short sentence (no secrets; mask emails as [email] if needed).
+- confidence: 0.0–1.0 for your workflow choice.
 
 Output a single JSON object with keys: workflow, confidence, language, customer_name, product_name, product_number, extraction_summary.
 """
 
 
+def build_llm_router_user_content(raw_prompt: str) -> str:
+    """
+    Original prompt plus non-secret heuristic hints so the model routes create/search cases
+    that regex missed (e.g. NM natural language + phone/email).
+    """
+    from planner import _classify_intent, _extract_email, _extract_phone
+
+    intent = _classify_intent(raw_prompt)
+    has_email = bool(_extract_email(raw_prompt))
+    has_phone = bool(_extract_phone(raw_prompt))
+    low = raw_prompt.lower()
+    mentions_customer = bool(
+        re.search(
+            r"\b(customer|customers|client|clients|kunde|kunden|kunder|kundene|firma|company)\b",
+            low,
+            re.IGNORECASE,
+        )
+    )
+    mentions_product = bool(
+        re.search(r"\b(product|products|produkt|produkter|vare|varer|article|articles)\b", low)
+    )
+    mentions_employee = bool(
+        re.search(
+            r"\b(employee|employees|staff|team|ansatt|ansatte|medarbeider|medarbeidere|kollegaer)\b",
+            low,
+        )
+    )
+    mentions_find = bool(
+        re.search(
+            r"\b(find|search|lookup|look\s+up|søk|finn|oppslag|liste|list|show|display|vis|hent)\b",
+            low,
+        )
+    )
+    mentions_create = bool(
+        re.search(
+            r"\b(create|add|register|new|opprett|registrer|legg\s+til|ny\s+kunde|ny\s+kunder|nytt\s+produkt)\b",
+            low,
+        )
+    )
+    return (
+        f"{raw_prompt.strip()}\n\n"
+        "---\n"
+        "Routing hints (deterministic, no secrets):\n"
+        f"- coarse_intent: {intent}\n"
+        f"- has_email_in_text: {has_email}\n"
+        f"- has_phone_in_text: {has_phone}\n"
+        f"- mentions_customer_terms: {mentions_customer}\n"
+        f"- mentions_product_terms: {mentions_product}\n"
+        f"- mentions_employee_terms: {mentions_employee}\n"
+        f"- mentions_find_or_list_verbs: {mentions_find}\n"
+        f"- mentions_create_or_add_verbs: {mentions_create}\n"
+        "Use these hints together with the user text. Prefer a green workflow when cues align; "
+        "use noop only when the request is outside employee/customer/product tasks."
+    )
+
+
 def call_llm_router(prompt: str) -> LLMRouterJSON | None:
     """Call remote LLM; return parsed model or None on failure."""
-    raw = _openai_chat_json(_SYSTEM_PROMPT, prompt)
+    user_content = build_llm_router_user_content(prompt)
+    raw = _openai_chat_json(_SYSTEM_PROMPT, user_content)
     if raw is None:
         return None
     try:
@@ -174,9 +236,12 @@ def llm_router_json_to_plan(raw_prompt: str, llm: LLMRouterJSON) -> "Plan":
 
     intent = _classify_intent(raw_prompt)
     snippet = re.sub(r"\s+", " ", raw_prompt.strip())[:120]
+    hint_em = int(bool(_extract_email(raw_prompt)))
+    hint_ph = int(bool(_extract_phone(raw_prompt)))
     detail = (
         f"llm:workflow={wf}|lang={llm.language}|conf={llm.confidence:.2f}|"
-        f"{(llm.extraction_summary or '')[:200]}"
+        f"i={intent}|em={hint_em}|ph={hint_ph}|"
+        f"{(llm.extraction_summary or '')[:180]}"
     )
     hints = [
         "Planner LLM router (Spor B).",

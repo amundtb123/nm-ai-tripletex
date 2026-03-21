@@ -9,9 +9,25 @@ from unittest.mock import MagicMock, patch
 from planner import build_plan, build_plan_rules
 from planner_llm import (
     LLMRouterJSON,
+    build_llm_router_user_content,
     llm_router_json_to_plan,
     try_llm_plan_after_noop_with_detail,
 )
+
+
+class TestBuildLlmRouterUserContent(unittest.TestCase):
+    def test_hints_include_phone_and_create_cues(self) -> None:
+        text = "Registrer ny kunde Hansen AS, telefon +47 900 00 000"
+        body = build_llm_router_user_content(text)
+        self.assertIn("has_phone_in_text: True", body)
+        self.assertIn("coarse_intent:", body)
+        self.assertIn("mentions_create_or_add_verbs: True", body)
+        self.assertIn("Hansen", text)
+
+    def test_hints_include_customer_terms(self) -> None:
+        body = build_llm_router_user_content("Finn kunden Acme for meg")
+        self.assertIn("mentions_customer_terms: True", body)
+        self.assertIn("mentions_find_or_list_verbs: True", body)
 
 
 class TestPlannerLLMMapping(unittest.TestCase):

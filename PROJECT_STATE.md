@@ -78,6 +78,10 @@ Deliver a **small, deployable FastAPI service** for the competition that:
 
 **Verifisering i logger:** Når LLM faktisk velger et grønt workflow, skal **`plan_built`** vise **`planner_mode`:** **`llm`**, **`workflow_route`:** **`llm`**, **`planner_llm_status`:** **`ok`**, samt **`planner_confidence`** / **`planner_language`** / **`planner_route_detail`**. Se **`TESTING.md`** for `gcloud logging`-/`jq`-eksempler.
 
+**Drift — LLM aktiv, men `llm_noop` på NM (2026-03-21):** I Cloud Run er LLM **bekreftet i bruk** (API-nøkkel + `LLM_PLANNER_ENABLED`). En NM-runde ga **0/7** der logger viste bl.a. **`detected_intent`:** **`create`**, **`has_phone`:** **true**, **`planner_llm_status`:** **`llm_noop`** / **`planner_mode`:** **`noop`** — modellen valgte **`noop`** selv om oppgaven sannsynligvis skulle til et **grønt** workflow. **Årsak (antatt):** for konservativ systeminstruks («prefer noop») og manglende eksplisitte signaler til modellen.
+
+**Justering (minimal, samme scope):** I **`planner_llm.py`**: (1) systemprompt omskrevet — **`noop` kun** når forespørselen tydelig er **utenfor** ansatt/kunde/produkt-oppgaver; prioritert mapping av naturlig **opprett/søk** + kontekst. (2) **`build_llm_router_user_content`**: legger ved **deterministiske hints** (samme grov-intent som regler, tilstedeværelse av e-post/telefon, treff på kunde/produkt/ansatt-ord, søk/liste vs opprett) — **ingen** hemmeligheter. (3) **`planner_route_detail`** ved vellykket LLM-ruting utvider sammendrag med kompakt **`i=…|em=…|ph=…`** for feilsøking. **Tester:** `tests/test_planner_llm.py` — nye tester for hint-innhold.
+
 **Kjent gjeld / ikke støttet ennå:** LLM scope dekker **ikke** faktura/betaling; **invoice/payment**-workflows er **ikke** utvidet i `planner_llm.py`. **Naturlige** faktura-/betalingsprompts som **ikke** treffer regex kan fortsatt bli **`noop`** når LLM ikke er aktivert eller feiler. **Ingen** bred ny forretningslogikk i `workflows.py` i denne runden.
 
 ---
