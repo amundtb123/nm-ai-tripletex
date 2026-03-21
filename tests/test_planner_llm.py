@@ -78,16 +78,37 @@ class TestPlannerLLMFallback(unittest.TestCase):
 
     def test_low_confidence_returns_reason(self) -> None:
         llm = LLMRouterJSON(
-            workflow="list_employees",
+            workflow="noop",
             confidence=0.1,
             language="en",
             extraction_summary="x",
         )
         with patch.dict(os.environ, {"LLM_PLANNER_ENABLED": "1", "OPENAI_API_KEY": "sk-test"}):
             with patch("planner_llm.call_llm_router", return_value=llm):
-                p, d = try_llm_plan_after_noop_with_detail("natural prompt")
+                p, d = try_llm_plan_after_noop_with_detail(
+                    "asdfghjkl totally random text with no routing signals at all"
+                )
         self.assertIsNone(p)
         self.assertTrue(d.startswith("low_confidence:"))
+
+    @patch("planner_llm.heuristic_green_workflow_after_llm_noop", return_value=None)
+    def test_low_confidence_green_workflow_still_used(self, _mock_h: MagicMock) -> None:
+        """Under min confidence, keep a green LLM workflow instead of noop."""
+        llm = LLMRouterJSON(
+            workflow="search_customer",
+            confidence=0.35,
+            language="no",
+            customer_name="Acme",
+            extraction_summary="x",
+        )
+        with patch.dict(os.environ, {"LLM_PLANNER_ENABLED": "1", "OPENAI_API_KEY": "sk-test"}):
+            with patch("planner_llm.call_llm_router", return_value=llm):
+                p, d = try_llm_plan_after_noop_with_detail("Finn kunden Acme")
+        self.assertIsNotNone(p)
+        self.assertEqual(d, "ok_low_confidence_llm")
+        assert p is not None
+        self.assertEqual(p.workflow, "search_customer")
+        self.assertEqual(p.planner_llm_status, "ok_low_confidence_llm")
 
     def test_llm_noop_from_model(self) -> None:
         llm = LLMRouterJSON(

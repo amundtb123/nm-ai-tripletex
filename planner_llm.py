@@ -30,8 +30,11 @@ GREEN_WORKFLOWS = (
 )
 
 _LLM_CONFIDENCE_MIN = 0.45
-_HEURISTIC_MIN_SCORE = 3.4
-_HEURISTIC_AMBIGUITY_GAP = 0.65
+# Lower bar + tighter gap → fewer false "ambiguous" noops when a green workflow is clearly ahead.
+_HEURISTIC_MIN_SCORE = 2.85
+_HEURISTIC_AMBIGUITY_GAP = 0.48
+# Only treat as ambiguous when the runner-up is also quite strong (both workflows plausible).
+_HEURISTIC_SECOND_STRONG_MIN = 3.15
 
 
 class LLMRouterJSON(BaseModel):
@@ -145,16 +148,22 @@ def collect_router_signals(raw_prompt: str) -> dict[str, Any]:
 
     mentions_customer = bool(
         re.search(
-            r"\b(customer|customers|client|clients|kunde|kunden|kunder|kundene|firma|company)\b",
+            r"\b(customer|customers|client|clients|kunde|kunden|kunder|kundene|firma|company|"
+            r"bedrift|bedrifter|organisasjon|kontakt|kontakter|mottaker|avsender)\b",
             low,
         )
     )
     mentions_product = bool(
-        re.search(r"\b(product|products|produkt|produkter|vare|varer|article|articles|sku)\b", low)
+        re.search(
+            r"\b(product|products|produkt|produkter|vare|varer|article|articles|sku|"
+            r"artikkel|artikkelnr|varenummer|lager)\b",
+            low,
+        )
     )
     mentions_employee = bool(
         re.search(
-            r"\b(employee|employees|staff|team|ansatt|ansatte|medarbeider|medarbeidere|kollegaer|colleagues)\b",
+            r"\b(employee|employees|staff|team|ansatt|ansatte|medarbeider|medarbeidere|kollegaer|colleagues|"
+            r"personell|personalet|lønns|timeliste|personal)\b",
             low,
         )
     )
@@ -165,7 +174,10 @@ def collect_router_signals(raw_prompt: str) -> dict[str, Any]:
         )
     )
     mentions_list = bool(
-        re.search(r"\b(list|show|display|vis|liste|get|hent|print|give\s+me)\b", low)
+        re.search(
+            r"\b(list|show|display|vis|liste|get|hent|print|give\s+me|oversikt|alle|export)\b",
+            low,
+        )
     )
     mentions_create = bool(
         re.search(
@@ -193,6 +205,19 @@ def collect_router_signals(raw_prompt: str) -> dict[str, Any]:
 def _heuristic_blocked(raw_prompt: str) -> bool:
     """Do not override LLM noop for invoice/payment-first prompts (out of green scope)."""
     low = raw_prompt.lower()
+    # Clear green-scope routing — never zero-out scores for these (even if "faktura"/"betaling" appear).
+    if re.search(
+        r"\b(hvem|who)\s+.{0,40}?\b(jobber|ansatt|ansatte|employee|staff|kollegaer|medarbeider|medarbeidere)\b",
+        low,
+    ):
+        return False
+    if re.search(
+        r"\b(finn|søk|finne|look\s+up|search|vis\s+alle|liste|oversikt|hent)\s+.{0,48}?"
+        r"\b(kunde|kunden|kunder|kundene|vare|varen|varer|produkt|produkter|produktet|artikkel|"
+        r"ansatte?|medarbeider|medarbeidere|employee|staff|kollegaer)\b",
+        low,
+    ):
+        return False
     if re.search(
         r"\b(registrer\s+betaling|register\s+payment|pay\s+invoice|betal\s+faktura|invoice\s+payment|payment\s+for\s+invoice)\b",
         low,
@@ -233,6 +258,15 @@ def _score_green_workflows(raw_prompt: str) -> dict[str, float]:
             scores["list_employees"] += 2.5
         if re.search(r"\b(work|works|jobber|ansett|hire)\b", low):
             scores["list_employees"] += 1.0
+        if s["mentions_who_or_all"] and re.search(
+            r"\b(employee|staff|ansatt|ansatte|medarbeider|kollegaer|personell)\b",
+            low,
+        ):
+            scores["list_employees"] += 2.2
+        if re.search(r"\b(oversikt|liste|alle|everyone|everybody|samtlige)\b", low) and s[
+            "mentions_employee_terms"
+        ]:
+            scores["list_employees"] += 1.8
 
     if s["mentions_customer_terms"] and s["mentions_create_or_add_verbs"]:
         scores["create_customer"] += 6.0
@@ -298,7 +332,7 @@ def heuristic_green_workflow_after_llm_noop(raw_prompt: str) -> tuple[str, str, 
 
     if best_s < _HEURISTIC_MIN_SCORE:
         return None
-    if best_s - second_s < _HEURISTIC_AMBIGUITY_GAP and second_s >= 2.8:
+    if best_s - second_s < _HEURISTIC_AMBIGUITY_GAP and second_s >= _HEURISTIC_SECOND_STRONG_MIN:
         return None
 
     conf = min(0.74, 0.5 + best_s * 0.035)
@@ -490,21 +524,41 @@ def try_llm_plan_after_noop_with_detail(raw_prompt: str) -> tuple[Plan | None, s
     llm = call_llm_router(raw_prompt)
     if llm is None:
         return None, "llm_invalid_response"
+
+    def _plan_from_heuristic_override() -> tuple[Plan, str] | None:
+        hw = heuristic_green_workflow_after_llm_noop(raw_prompt)
+        if hw is None:
+            return None
+        wf, reason, conf, compact = hw
+        synth = _synthetic_llm_from_heuristic(raw_prompt, wf, reason, conf, compact)
+        log_line = f"override_noop->{wf}|{reason}|{compact}"
+        plan = llm_router_json_to_plan(
+            raw_prompt,
+            synth,
+            heuristic_override=True,
+            heuristic_log=log_line,
+        )
+        return plan, "ok_heuristic_override"
+
+    # Prefer deterministic scores when the model is noop or under-confident.
+    if llm.workflow == "noop" or llm.confidence < _LLM_CONFIDENCE_MIN:
+        got = _plan_from_heuristic_override()
+        if got is not None:
+            return got
+
+    # Keep a green workflow from the LLM even when confidence is below the usual bar.
+    if (
+        llm.workflow != "noop"
+        and llm.workflow in GREEN_WORKFLOWS
+        and llm.confidence < _LLM_CONFIDENCE_MIN
+    ):
+        plan = llm_router_json_to_plan(raw_prompt, llm)
+        plan = plan.model_copy(update={"planner_llm_status": "ok_low_confidence_llm"})
+        return plan, "ok_low_confidence_llm"
+
     if llm.confidence < _LLM_CONFIDENCE_MIN:
         return None, f"low_confidence:{llm.confidence:.2f}"
     if llm.workflow == "noop":
-        hw = heuristic_green_workflow_after_llm_noop(raw_prompt)
-        if hw is not None:
-            wf, reason, conf, compact = hw
-            synth = _synthetic_llm_from_heuristic(raw_prompt, wf, reason, conf, compact)
-            log_line = f"override_noop->{wf}|{reason}|{compact}"
-            plan = llm_router_json_to_plan(
-                raw_prompt,
-                synth,
-                heuristic_override=True,
-                heuristic_log=log_line,
-            )
-            return plan, "ok_heuristic_override"
         return None, "llm_chose_noop"
     return llm_router_json_to_plan(raw_prompt, llm), "ok"
 

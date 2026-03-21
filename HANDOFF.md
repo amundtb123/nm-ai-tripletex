@@ -15,12 +15,16 @@
 | Tester | `tests/test_solve_validation.py` | `TestClient`-tester for tolerant parsing + 422-logg. |
 | Avhengighet | `requirements.txt` | `httpx` (kreves av Starlette `TestClient`). |
 
-Kjør tester: `python3 -m unittest discover -s tests -p 'test*.py'` (46 tester etter denne runden).
+Kjør tester: `python3 -m unittest discover -s tests -p 'test*.py'` (55 tester etter noop-reduksjon 2026-03-21).
+
+## Noop-reduksjon (2026-03-21) — score
+
+Se **`PROJECT_STATE.md` §2.1** *Justering (runde 3 — noop-reduksjon)*. Kort: flere **norske** eksakte triggere og **`list_employees`**-fallback; **`planner_llm`**: lavere heuristikkterskler, bedre **`_heuristic_blocked`**-presisjon, **`ok_low_confidence_llm`**, heuristikk **før** `low_confidence`-avvisning når modellen er noop/usikker.
 
 ## Neste steg (score / stabilitet)
 
 1. **Verifiser i Cloud Run:** etter deploy skal **`request_validation_error`** være **sjelden**; når den finnes, bruk loggfeltet til å se **nøyaktig** hvilket felt NM sender feil.
-2. **Planner:** fortsett arbeid mot **`llm_noop`** på grønne workflows (heuristikk, terskler, systemprompt) — se `PROJECT_STATE.md` §2.1 og §5.
+2. **Planner:** monitorer **`planner_llm_status`** (`llm_noop`, `ok_heuristic_override`, `ok_low_confidence_llm`) og **`noop`**-rate på NM — se `PROJECT_STATE.md` §2.1.
 3. **Ikke** utvid til faktura/betaling i `planner_llm` før grønt scope er stabilt.
 
-Detaljert bakgrunn og tabelloppdateringer: **`PROJECT_STATE.md`** (seksjon *Handoff — NM POST /solve 422*).
+Detaljert bakgrunn: **`PROJECT_STATE.md`** (422-handoff + §2.1 runde 3).

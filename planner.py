@@ -45,6 +45,14 @@ _WORKFLOW_RULES: tuple[tuple[WorkflowKind, tuple[str, ...]], ...] = (
             "show employees",
             "get employees",
             "ansatte",
+            "liste over ansatte",
+            "oversikt over ansatte",
+            "alle ansatte",
+            "hvem jobber",
+            "ansattliste",
+            "medarbeiderliste",
+            "vis ansatte",
+            "personalet",
         ),
     ),
     ("search_invoice", ("search invoice", "find invoice", "søk faktura", "finn faktura")),
@@ -61,7 +69,18 @@ _WORKFLOW_RULES: tuple[tuple[WorkflowKind, tuple[str, ...]], ...] = (
         "create_invoice_for_customer",
         ("create invoice", "opprett faktura", "invoice for customer", "faktura til kunde"),
     ),
-    ("search_customer", ("find customer", "search customer", "finn kunde")),
+    (
+        "search_customer",
+        (
+            "find customer",
+            "search customer",
+            "finn kunde",
+            "søk kunde",
+            "kundeoppslag",
+            "finn kunden",
+            "søk etter kunde",
+        ),
+    ),
     ("update_customer", ("update customer", "oppdater kunde")),
     (
         "search_product",
@@ -72,10 +91,34 @@ _WORKFLOW_RULES: tuple[tuple[WorkflowKind, tuple[str, ...]], ...] = (
             "finn produkt",
             "list products",
             "liste produkter",
+            "søk vare",
+            "vareoppslag",
+            "finn varen",
+            "søk etter vare",
+            "søk etter produkt",
         ),
     ),
-    ("create_product", ("create product", "opprett produkt", "nytt produkt")),
-    ("create_customer", ("create customer", "opprett kunde")),
+    (
+        "create_product",
+        (
+            "create product",
+            "opprett produkt",
+            "nytt produkt",
+            "ny vare",
+            "legg til produkt",
+            "registrer produkt",
+        ),
+    ),
+    (
+        "create_customer",
+        (
+            "create customer",
+            "opprett kunde",
+            "ny kunde",
+            "registrer kunde",
+            "legg til kunde",
+        ),
+    ),
 )
 
 _INVOICE_AUTOPRODUCT_PHRASES: tuple[str, ...] = (
@@ -270,11 +313,11 @@ def _extract_product_code(text: str) -> str:
 # After strict substring triggers: natural-language prompts may separate verb and entity
 # (e.g. "list all employees …") so "list employees" never matches as one contiguous substring.
 _LIST_EMPLOYEES_ENTITY_RE = re.compile(
-    r"\b(employees?|ansatte|medarbeider(?:e)?)\b",
+    r"\b(employees?|ansatte?|medarbeider(?:e)?|personell|kollegaer|kolleger)\b",
     re.IGNORECASE,
 )
 _LIST_EMPLOYEES_VERB_RE = re.compile(
-    r"\b(list|find|show|get|display|retrieve|fetch|vis|finn|hent)\b",
+    r"\b(list|find|show|get|display|retrieve|fetch|vis|finn|hent|oversikt|alle|who|whom|hvem|tell|gi\s+meg|ta\s+ut)\b",
     re.IGNORECASE,
 )
 

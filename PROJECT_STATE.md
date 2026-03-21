@@ -86,6 +86,18 @@ Deliver a **small, deployable FastAPI service** for the competition that:
 
 **Kjent gjeld etter runde 2:** Ekstremt tvetydige prompts kan fortsatt ende **noop** (begge scorer lave / for lik margin). **Faktura/betaling** uten grønn krok er **med vilje** ikke heuristisk mappet til kunde/produkt (unngår feil route). **Invoice/payment**-workflows er **ikke** utvidet i `planner_llm.py`.
 
+**Justering (runde 3 — noop-reduksjon / score, 2026-03-21):** Målet er **færre** `noop` når NM-prompten **tydelig** er innen de fem grønne workflowene.
+
+| Område | Endring |
+|--------|---------|
+| **`planner.py`** | Flere **norske eksakte delstreng-triggere** (bl.a. `søk kunde`, `liste over ansatte`, `ny kunde`, `søk vare`, `legg til produkt`, …). **`list_employees`**-fallback: utvidet **entitet** (`ansatte?`, `kollegaer`, …) og **verb** (`oversikt`, `alle`, `hvem`, `who`, `gi meg`, …). |
+| **`planner_llm.py`** | **Heuristikk:** `_HEURISTIC_MIN_SCORE` **2,85**, `_HEURISTIC_AMBIGUITY_GAP` **0,48**, `_HEURISTIC_SECOND_STRONG_MIN` **3,15** (færre «tvetydig»-avslag når nr. 2 ikke er like sterk). **`collect_router_signals`:** flere NO/EN-ord (bedrift, artikkel, personell, …). **`_heuristic_blocked`:** *unblock* når teksten ligner **grønt søk** (`finn/søk/…` + kunde/produkt/ansatt, eller `hvem` + jobb/ansatt) **før** harde betalings-/faktura-regexer — reduserer at «faktura» i setningen dreper scoring. **Scoring:** ekstra løft for **ansattliste** (who+employee, oversikt/alle+employee). **`try_llm_plan_after_noop_with_detail`:** kjører **heuristikk først** når modellen sier **`noop`** *eller* confidence **< 0,45**; godtar dessuten **`ok_low_confidence_llm`** når modellen velger et **grønt** workflow under terskel (unngår noop når modellen «nesten» traff). |
+| **Tester** | `tests/test_planner_green_recall.py` (NO-triggere, fallback, unblock vs betaling). Oppdatert `tests/test_planner_llm.py` (lav confidence). |
+
+**Oppdatert fallback-tolkning (LLM-steg):** Rekkefølgen er nå: heuristikk ved **noop eller lav confidence** → ev. **behold grønt LLM-valg** med `planner_llm_status` **`ok_low_confidence_llm`** → ellers **`low_confidence`** / **`llm_chose_noop`**. Punkt 4 i listen over (eldre tekst om «lav confidence») er dermed **myknet**: lav confidence alene leder **ikke** alltid til noop om heuristikk eller grønt workflow kan brukes.
+
+**Gjenstående høyrisiko-mønstre (bevisst korte):** (1) Eksakt trigger **`ansatte`** treffer **enhver** setning som inneholder ordet «ansatte» — høy recall, kan gi **feil** `list_employees` på sjeldne setninger. (2) Blandet **opprett + søk** kunde i én prompt kan fortsatt gi **tvetydig** score. (3) Uten LLM (miljø av) og uten regex-treff → fortsatt **`noop`**.
+
 **Kjent gjeld / ikke støttet ennå:** LLM scope dekker **ikke** faktura/betaling; **invoice/payment**-workflows er **ikke** utvidet i `planner_llm.py`. **Naturlige** faktura-/betalingsprompts som **ikke** treffer regex kan fortsatt bli **`noop`** når LLM ikke er aktivert eller feiler. **Ingen** bred ny forretningslogikk i `workflows.py` i denne runden.
 
 ---
