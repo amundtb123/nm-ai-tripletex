@@ -141,7 +141,7 @@ Forutsetter `gcloud` innlogget og et GCP-prosjekt valgt.
 ```bash
 export PROJECT_ID=your-gcp-project
 export SERVICE=ai-accounting-agent
-export REGION=europe-north1
+export REGION=europe-west1
 
 gcloud builds submit --tag gcr.io/${PROJECT_ID}/${SERVICE}
 ```
@@ -160,6 +160,8 @@ gcloud run deploy ${SERVICE} \
 Cloud Run setter `PORT` automatisk; containeren leser `${PORT:-8080}` i `Dockerfile`.
 
 3. Kall den utstedte URL-en med samme `/health` og `/solve` som lokalt.
+
+**NM / konkurranse:** Bruk tjenesten **`ai-accounting-agent`** i **`europe-west1`** (ikke en tilfeldig annen Cloud Run-service i annen region — da tester dere ikke det faktiske NM-endpointet). Se **`HANDOFF.md`** og **`PROJECT_STATE.md` §20**.
 
 **Konkurranse (NM i AI) submission-skjema:** Fyll **Endpoint URL** med **`https://<cloud-run-service-url>/solve`** (full path til **`/solve`**). **API Key** kan stå **tom** med denne appen (ingen innebygd nøkkel på `/solve`). Se **`PROJECT_STATE.md` §19** for sjekkliste og detaljer.
 

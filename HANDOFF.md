@@ -8,6 +8,8 @@
 
 **Produksjon / drift:** `POST /solve` er **stabil**. **422-problemet** (Pydantic som avviste body før handler) er **løst** (tolerant `schemas.py`, logging av valideringsfeil). **Cloud Run deploys** fungerer. **Routing og logging** er utvidet (`planner_mode`, `planner_llm_status`, heuristikk-logg, `file_count`, osv.).
 
+**Cloud Run — hvilken tjeneste er NM-endpointet (viktig):** Konkurranse-/NM-testing skal alltid treffe **`ai-accounting-agent`** i **`europe-west1`**, f.eks. `https://ai-accounting-agent-2wgziq3vqq-ew.a.run.app/solve`. Tjenesten **`nm-ai-tripletex`** i **`europe-north1`** er en **ekstra** Cloud Run-service som ble opprettet ved uhell / sideeffekt av annet navn — **deploy dit** eller **logger derfra** gir **misvisende** signaler (annen revisjon / ikke det NM faktisk kaller). **Deploy** og **les `gcloud logging`** for **`ai-accounting-agent`** når dere tolker NM-atferd. Etter deploy av samme image til riktig service ble f.eks. **`latestReadyRevisionName`:** `ai-accounting-agent-00019-rtg` og **HTTP 200** på `/solve`. Detaljert runbook: **`PROJECT_STATE.md` §20**.
+
 **Grønt scope (aktivt optimalisert):** `list_employees`, `search_customer`, `create_customer`, `search_product`, `create_product`.
 
 **Bevisst utenfor scope / skal normalt ende som noop:** `create_invoice_for_customer`, `register_payment`, prosjekt/bred billing, lønn, månedsavslutning / periodisering / reversering, og øvrige brede regnskapsoppgaver.
