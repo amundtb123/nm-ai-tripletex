@@ -20,15 +20,76 @@ class TestBuildLlmRouterUserContent(unittest.TestCase):
     def test_hints_include_phone_and_create_cues(self) -> None:
         text = "Registrer ny kunde Hansen AS, telefon +47 900 00 000"
         body = build_llm_router_user_content(text)
+        self.assertIn("[router_input]", body)
+        self.assertIn("original_prompt:", body)
+        self.assertIn("entity_signals:", body)
+        self.assertIn("  customer: True", body)
+        self.assertIn("raw_signal_flags (debug):", body)
         self.assertIn("has_phone_in_text: True", body)
-        self.assertIn("coarse_intent:", body)
-        self.assertIn("mentions_create_or_add_verbs: True", body)
+        self.assertIn("coarse_intent_classifier:", body)
+        self.assertIn("create_or_register: True", body)
         self.assertIn("Hansen", text)
 
     def test_hints_include_customer_terms(self) -> None:
         body = build_llm_router_user_content("Finn kunden Acme for meg")
+        self.assertIn("  customer: True", body)
+        self.assertIn("find_or_list: True", body)
         self.assertIn("mentions_customer_terms: True", body)
-        self.assertIn("mentions_find_verbs: True", body)
+
+    def test_lookup_email_prefers_signals_for_search_not_create_only(self) -> None:
+        body = build_llm_router_user_content(
+            "Finn kunde Ola Bygg AS med e-post post@ola.test"
+        )
+        self.assertIn("email_in_text: True", body)
+        self.assertIn("  customer: True", body)
+        self.assertIn("find_or_list: True", body)
+
+    def test_price_question_sets_price_flag_and_product_entity(self) -> None:
+        body = build_llm_router_user_content("Hva er prisen på 'SuperWidget 3000'?")
+        self.assertIn("price_question: True", body)
+        self.assertIn("  product: True", body)
+
+    def test_stock_question_sets_stock_flag(self) -> None:
+        body = build_llm_router_user_content("Har vi 'Bolt M8' på lager?")
+        self.assertIn("stock_question: True", body)
+        self.assertIn("  product: True", body)
+
+    def test_employees_entity_signal(self) -> None:
+        body = build_llm_router_user_content("Hvem er de ansatte i bedriften?")
+        self.assertIn("  employees: True", body)
+
+    def test_heuristic_section_is_reference_not_command(self) -> None:
+        body = build_llm_router_user_content("Finn kunden Acme")
+        self.assertIn("heuristic_ranking (reference only", body)
+        self.assertIn("heuristic_top_workflow:", body)
+        self.assertIn("per_workflow_scores:", body)
+
+    def test_payment_prompt_shows_blocked_or_low_scores_in_ranking(self) -> None:
+        body = build_llm_router_user_content("Registrer betaling på faktura 12345")
+        self.assertIn("original_prompt:", body)
+        self.assertIn("per_workflow_scores:", body)
+        self.assertIn("create_customer: 0.00", body)
+
+    def test_clear_create_product_has_product_entity_and_create_signal(self) -> None:
+        body = build_llm_router_user_content(
+            "Opprett et nytt produkt: 'Gummipakning', pris 45 kr, mva 25%."
+        )
+        self.assertIn("  product: True", body)
+        self.assertIn("create_or_register: True", body)
+
+    def test_ambiguous_customer_both_finn_and_registrer_verbs(self) -> None:
+        """When both lookup and create verbs appear, both action_signals are true for LLM tie-break."""
+        body = build_llm_router_user_content("Finn og registrer ny kunde Hansen AS")
+        self.assertIn("find_or_list: True", body)
+        self.assertIn("create_or_register: True", body)
+        self.assertIn("  customer: True", body)
+
+
+class TestLLMRouterJSONSchema(unittest.TestCase):
+    def test_minimal_json_defaults_entity_and_reason(self) -> None:
+        llm = LLMRouterJSON.model_validate({"workflow": "noop", "confidence": 0.5})
+        self.assertEqual(llm.entity, "unknown")
+        self.assertEqual(llm.reason, "")
 
 
 class TestPlannerLLMMapping(unittest.TestCase):
@@ -37,6 +98,8 @@ class TestPlannerLLMMapping(unittest.TestCase):
             workflow="search_customer",
             confidence=0.92,
             language="no",
+            entity="customer",
+            reason="lookup with find verb and company name",
             customer_name="Nordisk Demo",
             extraction_summary="Bruker vil finne eksisterende kunde",
         )
@@ -49,12 +112,16 @@ class TestPlannerLLMMapping(unittest.TestCase):
         self.assertEqual(p.planner_selected_workflow, "search_customer")
         self.assertEqual(p.planner_selected_entity, "customer")
         self.assertIn("Nordisk", p.customer_name)
+        self.assertIn("entity=customer", p.planner_route_detail)
+        self.assertIn("reason=lookup with find verb", p.planner_route_detail)
 
     def test_llm_json_to_plan_create_product_en(self) -> None:
         llm = LLMRouterJSON(
             workflow="create_product",
             confidence=0.88,
             language="en",
+            entity="product",
+            reason="explicit new product registration",
             product_name="Widget Pro",
             extraction_summary="Create new product",
         )
@@ -62,6 +129,7 @@ class TestPlannerLLMMapping(unittest.TestCase):
         self.assertEqual(p.workflow, "create_product")
         self.assertEqual(p.planner_mode, "llm")
         self.assertEqual(p.name, "Widget Pro")
+        self.assertIn("entity=product", p.planner_route_detail)
 
 
 class TestPlannerLLMFallback(unittest.TestCase):

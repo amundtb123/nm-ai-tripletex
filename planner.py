@@ -53,6 +53,8 @@ _WORKFLOW_RULES: tuple[tuple[WorkflowKind, tuple[str, ...]], ...] = (
             "medarbeiderliste",
             "vis ansatte",
             "personalet",
+            "hvem er de ansatte",
+            "ansatte i bedriften",
         ),
     ),
     ("search_invoice", ("search invoice", "find invoice", "søk faktura", "finn faktura")),
@@ -96,6 +98,10 @@ _WORKFLOW_RULES: tuple[tuple[WorkflowKind, tuple[str, ...]], ...] = (
             "finn varen",
             "søk etter vare",
             "søk etter produkt",
+            "hva er prisen",
+            "pris på",
+            "på lager",
+            "sjekk om vi har",
         ),
     ),
     (
@@ -103,6 +109,8 @@ _WORKFLOW_RULES: tuple[tuple[WorkflowKind, tuple[str, ...]], ...] = (
         (
             "create product",
             "opprett produkt",
+            "opprett et nytt produkt",
+            "opprett nytt produkt",
             "nytt produkt",
             "ny vare",
             "legg til produkt",
