@@ -34,6 +34,8 @@ If either value is still a placeholder or the URL is malformed, the app returns 
 | `OPENAI_API_KEY` eller `LLM_PLANNER_API_KEY` | OpenAI-kompatibel nøkkel når LLM-planner er aktivert |
 | `LLM_PLANNER_BASE_URL` / `LLM_PLANNER_MODEL` | Valgfritt; default OpenAI `v1` + `gpt-4o-mini` |
 
+**Kun bytte planner-LLM** (f.eks. fra `gpt-4o-mini` til **GPT-5.1**): sett miljøvariabel **`LLM_PLANNER_MODEL=gpt-5.1`** (alias eller snapshot, f.eks. `gpt-5.1-2025-11-13`, etter det som gjelder i OpenAI API). Ingen kodeendring — bare `planner_llm._openai_chat_json` bruker denne strengen som `model` i `chat/completions`.
+
 ### LLM-router (Spor B) — verifisering etter Cloud Run-deploy
 
 **Når LLM faktisk ble brukt** (vellykket routing til et grønt workflow), skal **`plan_built`** inneholde:
