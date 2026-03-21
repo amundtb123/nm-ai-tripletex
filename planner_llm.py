@@ -42,6 +42,10 @@ _HEURISTIC_SECOND_STRONG_MIN = 3.15
 # Relaxed ambiguity: smaller gap → fewer "tie" rejections; lower bar for runner-up being "strong".
 _HEURISTIC_AMBIGUITY_GAP_RELAXED = 0.30
 _HEURISTIC_SECOND_STRONG_MIN_RELAXED = 2.58
+# Third pass: only when _weak_green_recall_eligible (OOS false, blocked false, weak consistent signals).
+_HEURISTIC_MIN_SCORE_WEAK = 1.72
+_HEURISTIC_AMBIGUITY_GAP_WEAK = 0.22
+_HEURISTIC_SECOND_STRONG_MIN_WEAK = 2.35
 
 
 class LLMRouterJSON(BaseModel):
@@ -217,7 +221,8 @@ def collect_router_signals(raw_prompt: str) -> dict[str, Any]:
     )
     mentions_find = bool(
         re.search(
-            r"\b(find|search|lookup|look\s+up|søk|finn|finne|oppslag|seek|locate|sjekk)\b",
+            r"\b(find|search|lookup|look\s+up|fetch|retrieve|pull\s+up|"
+            r"søk|finn|finne|oppslag|seek|locate|sjekk)\b",
             low,
         )
     )
@@ -227,10 +232,15 @@ def collect_router_signals(raw_prompt: str) -> dict[str, Any]:
             low,
         )
     )
+    # «the register» / «a register» is usually the noun (cash/customer book), not «register a customer».
     mentions_create = bool(
         re.search(
-            r"\b(create|add|register|new|opprett|registrer|legg\s+til|ny\s+kunde|nytt\s+produkt|set\s+up)\b",
+            r"\b(create|add|new|opprett|registrer|legg\s+til|ny\s+kunde|nytt\s+produkt|set\s+up)\b",
             low,
+        )
+        or (
+            re.search(r"\bregister\b", low)
+            and not re.search(r"\b(?:the|a|an)\s+register\b", low)
         )
     )
     mentions_who = bool(re.search(r"\b(who|whom|hvem|alle|all|everyone|everybody)\b", low))
@@ -294,6 +304,15 @@ def _standalone_green_request(raw_prompt: str) -> bool:
         r"ansatte?|medarbeider|medarbeidere|employee|staff|kollegaer)\b",
         low,
     ):
+        return True
+    # English CRM phrasing without «find …» contiguous to entity (still block if invoice dominates).
+    if re.search(
+        r"\b(get|fetch|retrieve|pull\s+up|show)\s+.{0,48}?"
+        r"\b(customer|customers|client|clients|kunde|kunden|kunder|kundene)\b",
+        low,
+    ):
+        if re.search(r"\b(faktura|invoice)\b", low):
+            return False
         return True
     if re.search(
         r"\b(hvem\s+er\s+de\s+ansatte|ansatte\s+i\s+bedriften|de\s+ansatte|list\s+employees|show\s+(all\s+)?staff)\b",
@@ -363,6 +382,43 @@ def _heuristic_relax_eligible(raw_prompt: str) -> bool:
     if _heuristic_blocked(raw_prompt):
         return False
     return _standalone_green_request(raw_prompt)
+
+
+def _weak_green_recall_eligible(raw_prompt: str) -> bool:
+    """
+    Third heuristic pass: relax_eligible prompts that still tie-break fail, plus weak non-standalone cues.
+    Never when OOS accounting or blocked.
+    """
+    if _non_green_accounting_context(raw_prompt):
+        return False
+    if _heuristic_blocked(raw_prompt):
+        return False
+    if _heuristic_relax_eligible(raw_prompt):
+        return True
+    low = raw_prompt.lower()
+    s = collect_router_signals(raw_prompt)
+    if s.get("mentions_staff_in_company"):
+        return True
+    if s["mentions_employee_terms"] and (
+        s["mentions_find_verbs"] or s["mentions_list_or_show_verbs"] or s["mentions_who_or_all"]
+    ):
+        return True
+    if s["mentions_customer_terms"] and (
+        s["mentions_find_verbs"] or s.get("mentions_existing_customer_cue")
+    ):
+        return True
+    if (s["mentions_product_terms"] or s.get("mentions_price_or_stock_lookup")) and (
+        s["mentions_find_verbs"] or s.get("mentions_price_or_stock_lookup")
+    ):
+        return True
+    if re.search(r"\b(opprett\s+et\s+nytt\s+produkt|opprett\s+nytt\s+produkt)\b", low):
+        return True
+    if re.search(
+        r"\b(registrer\s+ny\s+kunde|register\s+new\s+customer|add\s+new\s+customer|new\s+client|ny\s+kunde)\b",
+        low,
+    ) and not re.search(r"\b(faktura|invoice)\b", low):
+        return True
+    return False
 
 
 def _heuristic_blocked(raw_prompt: str) -> bool:
@@ -497,11 +553,15 @@ def heuristic_green_workflow_after_llm_noop(
     raw_prompt: str,
     *,
     relaxed: bool = False,
+    weak: bool = False,
 ) -> tuple[str, str, float, str] | None:
     """
     When the LLM returned noop (or low confidence), pick a green workflow from deterministic scores.
-    ``relaxed=True`` uses lower min score and looser ambiguity tie-break (only from second pass).
+    ``relaxed`` / ``weak`` use progressively lower min scores and looser tie-breaks (passes 2 and 3).
     """
+    if relaxed and weak:
+        raise ValueError("relaxed and weak cannot both be True")
+
     scores = _score_green_workflows(raw_prompt)
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     if not ranked:
@@ -511,7 +571,12 @@ def heuristic_green_workflow_after_llm_noop(
 
     compact = "|".join(f"{k.split('_')[0][:2]}={v:.1f}" for k, v in sorted(scores.items(), key=lambda x: -x[1]))
 
-    if relaxed:
+    if weak:
+        min_score = _HEURISTIC_MIN_SCORE_WEAK
+        amb_gap = _HEURISTIC_AMBIGUITY_GAP_WEAK
+        second_min = _HEURISTIC_SECOND_STRONG_MIN_WEAK
+        tag = "weak"
+    elif relaxed:
         min_score = _HEURISTIC_MIN_SCORE_RELAXED
         amb_gap = _HEURISTIC_AMBIGUITY_GAP_RELAXED
         second_min = _HEURISTIC_SECOND_STRONG_MIN_RELAXED
@@ -533,12 +598,16 @@ def heuristic_green_workflow_after_llm_noop(
 
 
 def heuristic_green_workflow_after_llm_noop_two_pass(raw_prompt: str) -> tuple[str, str, float, str] | None:
-    """Standard heuristic, then relaxed pass when eligible (standalone + not OOS)."""
-    h = heuristic_green_workflow_after_llm_noop(raw_prompt, relaxed=False)
+    """Standard → relaxed (standalone) → weak (consistent weak-green cues, still guarded)."""
+    h = heuristic_green_workflow_after_llm_noop(raw_prompt, relaxed=False, weak=False)
     if h is not None:
         return h
     if _heuristic_relax_eligible(raw_prompt):
-        return heuristic_green_workflow_after_llm_noop(raw_prompt, relaxed=True)
+        h = heuristic_green_workflow_after_llm_noop(raw_prompt, relaxed=True, weak=False)
+        if h is not None:
+            return h
+    if _weak_green_recall_eligible(raw_prompt):
+        return heuristic_green_workflow_after_llm_noop(raw_prompt, relaxed=False, weak=True)
     return None
 
 
