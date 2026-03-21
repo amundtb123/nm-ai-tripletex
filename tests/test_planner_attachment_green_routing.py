@@ -12,6 +12,7 @@ from planner_llm import (
     _billing_invoice_primary_task,
     _non_green_accounting_context,
     _score_green_workflows,
+    _standalone_green_request,
     heuristic_green_workflow_after_llm_noop_two_pass,
     try_llm_plan_after_noop_with_detail,
 )
@@ -33,6 +34,16 @@ class TestBillingPrimaryVsStandalone(unittest.TestCase):
 class TestNonGreenWithStandaloneExemption(unittest.TestCase):
     def test_lookup_customer_with_invoice_boilerplate_not_oos(self) -> None:
         p = "Look up customer Nordisk Demo AS. Invoice attached for your reference."
+        self.assertFalse(_non_green_accounting_context(p))
+
+    def test_fetch_customer_with_invoice_reference_only_not_oos(self) -> None:
+        """Incidental «invoice» (email/ref) must not block English fetch/get + customer."""
+        p = (
+            "Please fetch customer Nordisk AS; the invoice number "
+            "is mentioned only for reference in the email."
+        )
+        self.assertFalse(_billing_invoice_primary_task(p))
+        self.assertTrue(_standalone_green_request(p))
         self.assertFalse(_non_green_accounting_context(p))
 
     def test_product_price_with_vedlegg_not_oos(self) -> None:

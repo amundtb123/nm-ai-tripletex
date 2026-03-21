@@ -309,13 +309,14 @@ def _standalone_green_request(raw_prompt: str) -> bool:
         low,
     ):
         return True
-    # English CRM phrasing without «find …» contiguous to entity (still block if invoice dominates).
+    # English CRM phrasing without «find …» contiguous to entity.
+    # Do not treat incidental «invoice» (reference/boilerplate) as blocking unless billing is primary.
     if re.search(
         r"\b(get|fetch|retrieve|pull\s+up|show)\s+.{0,48}?"
         r"\b(customer|customers|client|clients|kunde|kunden|kunder|kundene)\b",
         low,
     ):
-        if re.search(r"\b(faktura|invoice)\b", low):
+        if re.search(r"\b(faktura|invoice)\b", low) and _billing_invoice_primary_task(raw_prompt):
             return False
         return True
     if re.search(
@@ -330,13 +331,14 @@ def _standalone_green_request(raw_prompt: str) -> bool:
         low,
     ):
         return True
-    # Catalog price/stock — not invoice line / billing discussion
+    # Catalog price/stock. Incidental «invoice»/«faktura» (reference only) must not block unless
+    # the ask is billing-primary (invoice line, dispute, find-invoice, etc.).
     if re.search(
         r"\b(hva\s+er\s+prisen|pris\s+på|prisen\s+på|har\s+vi|på\s+lager|stock|inventory|"
         r"what\s+is\s+the\s+price|what\s+is\s+the\s+cost)\b",
         low,
     ):
-        if re.search(r"\b(faktura|invoice)\b", low):
+        if re.search(r"\b(faktura|invoice)\b", low) and _billing_invoice_primary_task(raw_prompt):
             return False
         return True
     return False
@@ -371,6 +373,17 @@ def _billing_invoice_primary_task(raw_prompt: str) -> bool:
         return True
     if re.search(
         r"\b(invoice|faktura)\s+.{0,16}?\b(find|search|lookup|søk|finn)\b",
+        low,
+    ):
+        return True
+    # Price/cost on invoice line or explicit «on invoice» — billing, not catalog product lookup.
+    if re.search(
+        r"\b(price|cost|pris|prisen|koster|amount|beløp|what\s+is\s+the\s+price|what\s+is\s+the\s+cost|"
+        r"hva\s+er\s+prisen|pris\s+på|prisen\s+på)\b",
+        low,
+    ) and re.search(
+        r"\b(invoice\s+line|fakturalinje|on\s+(?:the\s+)?invoice|på\s+faktura\s+linje|"
+        r"pris\s+(?:på|for)\s+faktura|price\s+on\s+invoice)\b",
         low,
     ):
         return True
@@ -505,7 +518,7 @@ def _weak_green_recall_eligible(raw_prompt: str) -> bool:
     if re.search(
         r"\b(registrer\s+ny\s+kunde|register\s+new\s+customer|add\s+new\s+customer|new\s+client|ny\s+kunde)\b",
         low,
-    ) and not re.search(r"\b(faktura|invoice)\b", low):
+    ) and not _billing_invoice_primary_task(raw_prompt):
         return True
     return False
 
@@ -550,6 +563,21 @@ def _score_green_workflows(raw_prompt: str) -> dict[str, float]:
     s = collect_router_signals(effective)
     low = effective.lower()
     intent = _classify_intent(effective)
+    # «faktura»/«invoice» anywhere sets coarse intent to invoice before «create»/«search» in
+    # planner._classify_intent. For standalone CRM/catalog asks, remap for scoring so we do not
+    # drop search boosts when the word is only reference (guardrails unchanged: OOS uses full logic).
+    if (
+        intent == "invoice"
+        and _standalone_green_request(raw_prompt)
+        and not _billing_invoice_primary_task(raw_prompt)
+    ):
+        if (
+            s["mentions_find_verbs"]
+            or s["mentions_list_or_show_verbs"]
+            or s.get("mentions_price_or_stock_lookup")
+            or s.get("mentions_staff_in_company")
+        ):
+            intent = "search"
     has_em = bool(_extract_email(raw_prompt))
     has_ph = bool(_extract_phone(raw_prompt))
     pcode = _extract_product_code(raw_prompt)
@@ -632,9 +660,12 @@ def _score_green_workflows(raw_prompt: str) -> dict[str, float]:
         if s["mentions_product_terms"] or re.search(r"[«\"'][^«\"'\n]{2,}[»\"']", raw_prompt):
             scores["search_product"] += 3.0
 
+    # Invoice numbers often appear as reference on otherwise green CRM prompts; do not penalize
+    # when standalone + not billing-primary (same boundary as non_green exemption).
     if re.search(r"\b(faktura|invoice)\s*(nr|no|number|#)?\s*[:#]?\s*\d{3,}", low):
-        scores["create_customer"] -= 2.5
-        scores["search_customer"] -= 1.0
+        if not (_standalone_green_request(raw_prompt) and not _billing_invoice_primary_task(raw_prompt)):
+            scores["create_customer"] -= 2.5
+            scores["search_customer"] -= 1.0
 
     for w in GREEN_WORKFLOWS:
         scores[w] = max(0.0, scores[w])
