@@ -10,6 +10,9 @@ import uuid
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from starlette.requests import Request
 
 from file_parser import FileDecodeError, decode_files_to_tmp
 from planner import build_plan
@@ -49,6 +52,73 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="AI Accounting Agent", version="0.1.0")
 
 DEFAULT_PORT = 8080
+
+# Cap raw-body logging (Cloud Logging / NM payloads can be large).
+_MAX_VALIDATION_BODY_LOG_BYTES = 16_384
+
+_SENSITIVE_HEADER_NAMES = frozenset(
+    {
+        "authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key",
+        "x-auth-token",
+        "proxy-authorization",
+    }
+)
+
+
+def _sanitize_headers_for_log(request: Request) -> dict[str, str]:
+    """Header names/values for debugging; redact common secret carriers."""
+    out: dict[str, str] = {}
+    for k, v in request.headers.items():
+        lk = k.lower()
+        if lk in _SENSITIVE_HEADER_NAMES or lk.startswith("x-amz-"):
+            out[k] = "[redacted]"
+        else:
+            out[k] = v
+    return out
+
+
+def _raw_body_preview_for_log(raw: bytes | None) -> dict[str, object]:
+    if raw is None:
+        return {"length": 0, "truncated": False, "preview": ""}
+    truncated = len(raw) > _MAX_VALIDATION_BODY_LOG_BYTES
+    chunk = raw[:_MAX_VALIDATION_BODY_LOG_BYTES]
+    try:
+        preview = chunk.decode("utf-8")
+    except UnicodeDecodeError:
+        preview = chunk.hex()
+    return {
+        "length": len(raw),
+        "truncated": truncated,
+        "preview": preview,
+    }
+
+
+@app.middleware("http")
+async def capture_solve_request_body(request: Request, call_next):
+    """Cache POST /solve body so validation error logging can include a preview."""
+    if request.method == "POST" and request.url.path.rstrip("/").endswith("/solve"):
+        request.state.raw_body_bytes = await request.body()
+    return await call_next(request)
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error_handler(request: Request, exc: RequestValidationError) -> Any:
+    """422 before ``solve`` runs — log path, Pydantic errors, body preview, headers (sanitized)."""
+    raw = getattr(request.state, "raw_body_bytes", None)
+    log_structured(
+        logger,
+        logging.WARNING,
+        "request_validation_error",
+        path=request.url.path,
+        method=request.method,
+        validation_errors=exc.errors(),
+        raw_body=_raw_body_preview_for_log(raw if isinstance(raw, bytes) else None),
+        request_headers=_sanitize_headers_for_log(request),
+    )
+    return await request_validation_exception_handler(request, exc)
 
 
 @app.get("/health")

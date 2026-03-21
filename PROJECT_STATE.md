@@ -2,6 +2,8 @@
 
 > **Purpose:** Single handoff document if chat or team context is lost. Update this file when behavior or priorities change meaningfully.
 
+> **Siste økt / ny agent:** Se også **`docs/SESSION_WRAPUP.md`** for kort wrap-up (arkitektur, filer, git, tester, neste steg). **Kort NM-handoff (422 /solve):** **`HANDOFF.md`**.
+
 ---
 
 ## 1. Project goal
@@ -21,9 +23,9 @@ Deliver a **small, deployable FastAPI service** for the competition that:
 
 | Layer | Responsibility |
 |--------|----------------|
-| **`main.py`** | FastAPI app: `GET /health`, `POST /solve`; **/solve-livsløp** logger `request_received` → `files_decoded` → `plan_built` (inkl. **`workflow_route`**, **`workflow_route_detail`**, **`planner_mode`**, **`planner_selected_workflow`**, **`planner_selected_entity`**, **`planner_confidence`**, **`planner_language`**, **`planner_llm_status`**, **`planner_route_detail`**, **`planner_heuristic_log`**) → **`credential_config`-sjekk** (kun når `workflow` ≠ `noop`) → `workflow_started` → `workflow_finished` \| `workflow_failed` → `request_finished` (+ `tripletex_http`); kobles med `request_id`. Mapper `WorkflowInputError` / feilkonfigurerte Tripletex-credentials → **400**, `TripletexAPIError` → 502. **Ingen** hemmeligheter i logger. |
+| **`main.py`** | FastAPI app: `GET /health`, `POST /solve`; middleware **`capture_solve_request_body`** + **`request_validation_error`**-logger ved **422** (før handler); **/solve-livsløp** logger `request_received` → `files_decoded` → `plan_built` (inkl. **`workflow_route`**, **`workflow_route_detail`**, **`planner_mode`**, **`planner_selected_workflow`**, **`planner_selected_entity`**, **`planner_confidence`**, **`planner_language`**, **`planner_llm_status`**, **`planner_route_detail`**, **`planner_heuristic_log`**) → **`credential_config`-sjekk** (kun når `workflow` ≠ `noop`) → `workflow_started` → `workflow_finished` \| `workflow_failed` → `request_finished` (+ `tripletex_http`); kobles med `request_id`. Mapper `WorkflowInputError` / feilkonfigurerte Tripletex-credentials → **400**, `TripletexAPIError` → 502. **Ingen** hemmeligheter i logger. |
 | **`request_context.py`** | ContextVar **`solve_request_id`** (`Optional[str]`) slik `tripletex_http` får samme `request_id` som gjeldende `/solve`; union-syntaks unngås for **Python 3.9**-kompatibilitet. |
-| **`schemas.py`** | Pydantic models for `/solve` body (`SolveRequestBody`, credentials, file items). |
+| **`schemas.py`** | Pydantic models for `/solve` body (`SolveRequestBody`, credentials, file items): **`extra="ignore"`**, **`files: null` → `[]`**, enkel **`prompt`**-coercion. |
 | **`file_parser.py`** | Decode base64 uploads under `/tmp/uploads` (or `AI_AGENT_UPLOAD_ROOT`), batch dirs, basic path safety. |
 | **`planner.py`** | **`build_plan_rules`**: samme som før — **eksakte delstreng-triggere** → **ord-basert fallback** (**`list_employees`** → **`create_customer`** → **`search_customer`** → **`search_product`** → **`create_product`**; se **§5** punkt 20–22) + **slot extraction**. **`build_plan`**: kjører regler først; ved **`workflow` = `noop`** kalles **`planner_llm.try_llm_plan_after_noop_with_detail`** når **LLM er aktivert** (se **§2.1**). `Plan` utvidet med **`planner_*`**-felt (se **§2.1**). **`Optional[float]`** for Pydantic på **Python 3.9**. |
 | **`planner_llm.py`** | **Spor B:** OpenAI-kompatibel **`chat/completions`** med **`response_format: json_object`** → **`LLMRouterJSON`** (workflow + confidence + språk + slots + kort `extraction_summary`). Mapper til eksisterende **`Plan`** / **`workflows.py`**-input — **ingen** generering av Tripletex-paths eller HTTP. Kun workflows i **første LLM-scope** (se **§2.1**). |
@@ -99,7 +101,7 @@ Deliver a **small, deployable FastAPI service** for the competition that:
 ### Cross-cutting
 
 - Structured logging (`log_structured` + `tripletex_http` JSON lines on stdout)
-- Pydantic request validation (`extra="forbid"` on request models)
+- Pydantic request validation: **`extra="ignore"`** on `/solve` models (unknown JSON keys tolerated); **`files: null`** coerced to **`[]`**; **`prompt`** kan være JSON-tall/bool og coerces til streng. **422 før handler:** FastAPI **`RequestValidationError`** → strukturert logglinje **`request_validation_error`** med **`path`**, **`validation_errors`**, **`raw_body`** (lengde + avkortet preview), **`request_headers`** (sensitive headers redacted). Middleware **`capture_solve_request_body`** leser **`POST /solve`**-body én gang slik at preview finnes ved valideringsfeil.
 - File uploads to **`/tmp/uploads/batch_*`** (umask-style dirs `0700`; override with **`AI_AGENT_UPLOAD_ROOT`**)
 - Planner **`Plan`**: `workflow`, `target_entity`, `name`, `email`, `phone`, `customer_name`, `product_name`, `product_number`, `product_price`, `invoice_autocreate_product`, `payment_invoice_number`, `payment_amount`, `payment_date`, `notes`, `hints`, `detected_intent`, `raw_prompt`, **`workflow_route`** / **`workflow_route_detail`**, **`planner_mode`** (`exact_rule` \| `regex_fallback` \| `llm` \| `noop`), **`planner_selected_workflow`**, **`planner_selected_entity`**, **`planner_confidence`**, **`planner_language`**, **`planner_llm_status`**, **`planner_route_detail`**, **`planner_heuristic_log`**
 
@@ -1000,4 +1002,22 @@ https://ai-accounting-agent-xxxxx-ew.a.run.app/solve
 
 **API Key-felt:** **tomt** (**§19**).
 
-*Last updated: 2026-03-20 — **§5** punkt 22 search/create_product-fallbacks + NM 132/proxy; punkt 21 `create_customer`; punkt 20 `list_employees`; **§20** deploy-runbook + Cloud Shell-feilsøking; **§19** NM endpoint; **§18** score mode; **§17** grønne workflows; **§16** faktura/payment miljø; **3.11** anbefalt.*
+---
+
+## Handoff — NM `POST /solve` **422** (2026-03-21)
+
+**Observasjon:** Manuelle **`curl`**-kall ga **200** + **`request_received`**, mens Cloud Run viste **`POST /solve … 422`**. **Konklusjon:** **422** kommer fra **FastAPI/Pydantic body-validering** *før* **`solve()`** kjører — da finnes **ikke** `request_id` / `request_received` i logg (typisk mønster).
+
+**Sannsynlige årsaker (avstemt mot kode før fiks):**
+
+1. **`extra="forbid"`** — klient med **ekstra toppnivå-felt** (metadata) → **422**.
+2. **`"files": null`** — forventet liste → **422** (Pydantic godtok ikke `null`).
+3. **Feil innholdstype / ugyldig JSON** — gir **422** uten app-handler (logg viser nå rå preview der mulig).
+
+**Implementert i repo:** Se **`main.py`** (`request_validation_error_handler`, **`capture_solve_request_body`**), **`schemas.py`** ( **`ignore`**, **`files`**-coercion, **`prompt`**-coercion), **`requirements.txt`** (**`httpx`** for `TestClient`), **`tests/test_solve_validation.py`**.
+
+**Neste steg (score etter 422):** Bekreft i Cloud Logging at **`request_validation_error`** **ikke** lenger dominerer; deretter fortsett **planner_llm**-heuristikk / terskler for **`llm_noop`** på grønne workflows (se **§§2.1** og **§5** punkt 83–86).
+
+---
+
+*Last updated: 2026-03-21 — **Handoff** NM 422 + valideringslogging + tolerant `/solve`-parsing; **§5** punkt 22 search/create_product-fallbacks + NM 132/proxy; punkt 21 `create_customer`; punkt 20 `list_employees`; **§20** deploy-runbook + Cloud Shell-feilsøking; **§19** NM endpoint; **§18** score mode; **§17** grønne workflows; **§16** faktura/payment miljø; **3.11** anbefalt.*
