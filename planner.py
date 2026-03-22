@@ -244,7 +244,7 @@ def _strip_tail_for_payment_customer(tail: str, invoice_number: str) -> str:
 
 _INTENT_RULES: tuple[tuple[IntentKind, tuple[str, ...]], ...] = (
     ("payment", ("betaling", "payment", "innbetaling", "utbetaling", "betale")),
-    ("invoice", ("faktura", "invoice", "rechnung")),
+    ("invoice", ("faktura", "invoice", "rechnung", "factura", "facture", "fattura")),
     ("delete", ("slett", "delete", "fjern")),
     ("create", ("opprett", "create", "legg til", "ny kunde", "nytt")),
     ("update", ("oppdater", "update", "endre")),

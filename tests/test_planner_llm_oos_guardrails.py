@@ -92,6 +92,15 @@ class TestOosHeuristicBlocked(unittest.TestCase):
         self.assertTrue(_non_green_accounting_context(p))
         self.assertTrue(_heuristic_blocked(p))
 
+    def test_spanish_pending_invoice_blocked(self) -> None:
+        """ES: cliente + factura pendiente — billing context, not CRM search_customer."""
+        p = (
+            'El cliente Costa Brava SL (org. nº 923798498) tiene una factura pendiente '
+            'de 47900 NOK sin IVA por "Horas de consultoría"'
+        )
+        self.assertTrue(_non_green_accounting_context(p))
+        self.assertTrue(_heuristic_blocked(p))
+
 
 class TestOosScoresAndOverride(unittest.TestCase):
     def test_invoice_context_zeros_heuristic_scores(self) -> None:
@@ -111,6 +120,13 @@ class TestOosScoresAndOverride(unittest.TestCase):
         p = (
             "Wir haben die Rechnung INV-2026-2399 vom Lieferanten Waldstein GmbH "
             "(Org.-Nr. 859252303) über 5550 NOK"
+        )
+        self.assertEqual(sum(_score_green_workflows(p).values()), 0.0)
+
+    def test_spanish_factura_pendiente_zeros_heuristic_scores(self) -> None:
+        p = (
+            'El cliente Costa Brava SL tiene una factura pendiente de 47900 NOK '
+            'sin IVA por consultoría'
         )
         self.assertEqual(sum(_score_green_workflows(p).values()), 0.0)
 
