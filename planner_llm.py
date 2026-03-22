@@ -151,17 +151,18 @@ def _openai_chat_json(system: str, user: str) -> dict[str, Any] | None:
 
 _SYSTEM_PROMPT = """You are a JSON router for a Tripletex accounting assistant. Output ONE workflow and extract slots. Never output URLs, HTTP methods, or API paths.
 
-Allowed workflows (green scope only):
+Allowed workflows (green scope only — each maps to a single CRM/catalog/employee action):
 - list_employees — list who works at the company (ansatte, staff, employees).
 - search_customer — find or verify an EXISTING customer (finn, søk, look up, including when email/phone identify who to find).
 - create_customer — register a clearly NEW customer (opprett/registrer/ny kunde when not a lookup).
 - search_product — find or check an EXISTING product: price, stock, article/SKU, «på lager», «hva koster».
 - create_product — add a NEW product to the catalog (opprett/nytt produkt with article data).
-- noop — ONLY when the task is clearly NOT about employees, customers, or products in this system (e.g. invoice creation, payment registration, unrelated chat). Choosing noop for a plausible employee/customer/product request is a routing ERROR.
+- noop — use when the user request is NOT fully satisfied by exactly one of the workflows above. This includes: general ledger / journal / account analysis, reporting, trends, variance, budgets, KPIs, tax or period commentary, or any ask that is mainly «analyze / explain / compare / report» rather than «find this customer or product» or «list employees». Also: invoice issuance, payment registration, disputes, projects, payroll detail, period close — unless the ONLY ask is a standalone CRM line (find/register customer or product). Choosing noop for a clear standalone find/list/register of customer, product, or employees is wrong; choosing green for pure analysis/reporting is wrong.
 
 The HTTP request may include attached files; file bytes are NOT shown to you. Route ONLY from the text. The JSON field attachments_count is metadata only — it does not add or remove task scope. Do NOT choose noop solely because attachments_count > 0 or the text mentions an attachment, «vedlegg», or «invoice attached» when the actual task is still a CRM/catalog/employee lookup.
 
 Out-of-scope (always noop — do NOT map to green even if customer/product/email/price appear):
+- Reporting & books: general ledger, hovedbok, journal entries, account balances, cost/revenue trends, variance, «identify the top N accounts», month-over-month analysis.
 - Invoice/payment workflows: disputes, reminders, overdue, fees, KID, «faktura til kunde» as a billing task, registering payment.
 - Projects, payroll, monthly/period close, accruals/reversals — unless the ONLY ask is explicitly to find/register a customer or product as a CRM task (see standalone rule below).
 
@@ -169,7 +170,7 @@ Standalone green tasks (these stay in green scope):
 - Explicitly: find/search/list/show customer or product or employees; register new customer or new product; price/stock questions for a catalog article; «who are the employees».
 
 Decision procedure (follow in order):
-1) If the message is mainly invoice/payment/project/payroll/period-close → noop.
+1) If the message is mainly reporting/GL/analysis/budget/trends OR invoice/payment/project/payroll/period-close (and not a standalone CRM line below) → noop.
 2) Entity: employees, customer, product, or none.
 3) If employees → list_employees.
 4) If customer or product: decide lookup vs create.
@@ -183,6 +184,9 @@ Search-over-create (hard rules):
 - Price, stock, SKU, or product details alone do NOT imply create_product; price/stock questions → search_product.
 - Ambiguous → search_*.
 
+Slot extraction (when routing to search_customer or create_customer):
+- Fill customer_name with the company/person name from the prompt. If the text uses Spanish «el cliente / la cliente …» or French «le client …» before the name, put that name in customer_name (stop before «(» or verbs like tiene/hay). Same for «Finn kunden X», «customer: X».
+
 Contrast (mapping hints):
 - «Finn kunde Ola Bygg AS med e-post post@ola.no» → search_customer
 - «Registrer ny kunde Ola Bygg AS med e-post post@ola.no» → create_customer
@@ -194,6 +198,8 @@ Contrast (mapping hints):
 - «Invoice is wrong for customer Acme AS» → noop (complaint, not CRM)
 - «Create project linked to customer X» → noop
 - «Payroll email for employee» → noop
+- «Analyze the general ledger and identify the three largest expense accounts» → noop
+- «Total costs increased from January to February — explain» → noop
 
 The user message includes deterministic signals (hints). They are auxiliary — apply the decision procedure above; do not blindly copy the top heuristic.
 
@@ -1058,6 +1064,8 @@ def llm_router_json_to_plan(
         product_name = _strip_product_metadata(product_name) or product_name
 
     intent = _classify_intent(raw_prompt)
+    if wf == "noop":
+        intent = "unknown"
     snippet = re.sub(r"\s+", " ", raw_prompt.strip())[:120]
     hint_em = int(bool(_extract_email(raw_prompt)))
     hint_ph = int(bool(_extract_phone(raw_prompt)))

@@ -248,7 +248,13 @@ _INTENT_RULES: tuple[tuple[IntentKind, tuple[str, ...]], ...] = (
     ("delete", ("slett", "delete", "fjern")),
     ("create", ("opprett", "create", "legg til", "ny kunde", "nytt")),
     ("update", ("oppdater", "update", "endre")),
-    ("search", ("søk", "search", "finn", "liste", "hent", "oppslag")),
+    ("search", ("søk", "search", "finn", "finne", "liste", "hent", "oppslag")),
+)
+
+# English single-word keywords: use word boundaries so «search» does not match inside «research»,
+# «create» inside «created», etc. Other keywords keep substring matching (Norwegian inflections).
+_INTENT_BOUNDARY_EN: frozenset[str] = frozenset(
+    {"create", "search", "delete", "update", "payment", "invoice"}
 )
 
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
@@ -259,12 +265,20 @@ _PHONE_RE = re.compile(
 
 
 def _classify_intent(prompt: str) -> IntentKind:
+    """Keyword intent for logging/heuristics. English tokens use word boundaries so
+    «search» does not match inside «research», «create» inside «created», etc."""
     text = prompt.strip().lower()
     if not text:
         return "unknown"
     for intent, keywords in _INTENT_RULES:
         for kw in keywords:
-            if kw in text:
+            if " " in kw:
+                if kw in text:
+                    return intent
+            elif kw in _INTENT_BOUNDARY_EN:
+                if re.search(rf"(?<!\w){re.escape(kw)}(?!\w)", text):
+                    return intent
+            elif kw in text:
                 return intent
     return "unknown"
 
