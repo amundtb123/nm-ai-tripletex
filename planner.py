@@ -1,4 +1,4 @@
-"""Build an execution plan from the user prompt: exact rules → regex fallback → optional LLM router (Spor B)."""
+"""Build an execution plan from the user prompt: optional LLM-first (green scope) → exact rules → regex fallback → heuristic override (Spor B)."""
 
 from __future__ import annotations
 
@@ -725,17 +725,25 @@ def build_plan_rules(prompt: str) -> Plan:
     )
 
 
+def _noop_plan_primary_detail(detail: str) -> str:
+    """First segment when reasons are joined with | (LLM-first + heuristic chain)."""
+    if not detail:
+        return ""
+    return detail.split("|", 1)[0]
+
+
 def _noop_plan_with_llm_detail(plan: Plan, detail: str) -> Plan:
+    primary = _noop_plan_primary_detail(detail)
     status = "noop"
-    if detail == "llm_disabled":
+    if primary == "llm_disabled":
         status = "disabled"
-    elif detail == "llm_invalid_response":
+    elif primary == "llm_invalid_response":
         status = "invalid_response"
-    elif detail.startswith("low_confidence:"):
+    elif primary.startswith("low_confidence:"):
         status = "low_confidence"
-    elif detail == "llm_chose_noop":
+    elif primary == "llm_chose_noop":
         status = "llm_noop"
-    elif detail == "guardrail_rejected_llm_green":
+    elif primary == "guardrail_rejected_llm_green":
         status = "guardrail_rejected_green"
     return plan.model_copy(
         update={
@@ -746,13 +754,46 @@ def _noop_plan_with_llm_detail(plan: Plan, detail: str) -> Plan:
 
 
 def build_plan(prompt: str, file_count: int = 0) -> Plan:
-    """Rules + regex first; if ``noop``, optionally call LLM router (env-gated)."""
+    """
+    Default (``LLM_PLANNER_GREEN_FIRST`` on): LLM first for green scope; if noop/low
+    confidence, rules/regex; if still noop, heuristic override. Legacy order when
+    ``LLM_PLANNER_GREEN_FIRST`` is off: rules first, then LLM + heuristic bundle.
+    """
+    from planner_llm import (
+        llm_green_first_enabled,
+        llm_router_enabled,
+        try_heuristic_green_override_only_with_detail,
+        try_llm_green_first_with_detail,
+        try_llm_plan_after_noop_with_detail,
+    )
+
+    if llm_green_first_enabled():
+        llm_first_detail = ""
+        alt, detail = try_llm_green_first_with_detail(prompt, file_count=file_count)
+        llm_first_detail = detail
+        if alt is not None:
+            return alt
+
+        plan = build_plan_rules(prompt)
+        if plan.workflow != "noop":
+            return plan
+
+        alt2, h_detail = try_heuristic_green_override_only_with_detail(
+            prompt, file_count=file_count
+        )
+        if alt2 is not None:
+            return alt2
+
+        parts = [p for p in (llm_first_detail, h_detail) if p]
+        combined = "|".join(parts) if parts else h_detail
+        return _noop_plan_with_llm_detail(plan, combined)
+
     plan = build_plan_rules(prompt)
     if plan.workflow != "noop":
         return plan
-    from planner_llm import try_llm_plan_after_noop_with_detail
-
-    alt, detail = try_llm_plan_after_noop_with_detail(prompt, file_count=file_count)
-    if alt is not None:
-        return alt
-    return _noop_plan_with_llm_detail(plan, detail)
+    if llm_router_enabled():
+        alt, detail = try_llm_plan_after_noop_with_detail(prompt, file_count=file_count)
+        if alt is not None:
+            return alt
+        return _noop_plan_with_llm_detail(plan, detail)
+    return plan

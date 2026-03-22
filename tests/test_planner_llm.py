@@ -276,11 +276,27 @@ class TestBuildPlanIntegration(unittest.TestCase):
         mock_llm.assert_called_once()
 
     @patch("planner_llm.try_llm_plan_after_noop_with_detail")
-    def test_exact_rule_never_calls_llm_path(self, mock_try: MagicMock) -> None:
+    def test_exact_rule_never_calls_legacy_noop_llm_bundle_when_llm_disabled(self, mock_try: MagicMock) -> None:
+        """Without API keys, rules match and legacy LLM-after-noop is never invoked."""
         plan = build_plan("list employees")
         self.assertEqual(plan.workflow, "list_employees")
         self.assertEqual(plan.planner_mode, "exact_rule")
         mock_try.assert_not_called()
+
+    @patch("planner_llm.call_llm_router")
+    def test_exact_rule_wins_after_llm_noop_when_green_first(self, mock_llm: MagicMock) -> None:
+        """LLM-first: model noop → rules still return exact match for canonical trigger."""
+        mock_llm.return_value = LLMRouterJSON(
+            workflow="noop",
+            confidence=0.99,
+            language="en",
+            extraction_summary="skip",
+        )
+        with patch.dict(os.environ, {"LLM_PLANNER_ENABLED": "1", "OPENAI_API_KEY": "sk-test"}):
+            plan = build_plan("list employees")
+        self.assertEqual(plan.workflow, "list_employees")
+        self.assertEqual(plan.planner_mode, "exact_rule")
+        mock_llm.assert_called_once()
 
     @patch("planner_llm.call_llm_router")
     def test_noop_llm_invalid_keeps_noop_with_status(self, mock_llm: MagicMock) -> None:

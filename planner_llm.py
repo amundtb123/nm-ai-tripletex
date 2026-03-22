@@ -104,6 +104,20 @@ def llm_router_enabled() -> bool:
     return bool(key and key.strip())
 
 
+def llm_green_first_enabled() -> bool:
+    """
+    When True (default) and :func:`llm_router_enabled`, :func:`planner.build_plan`
+    calls the LLM before rules for green-scope routing. Set ``LLM_PLANNER_GREEN_FIRST=0``
+    to restore rules-first ordering.
+    """
+    if not llm_router_enabled():
+        return False
+    v = os.environ.get("LLM_PLANNER_GREEN_FIRST", "1").strip().lower()
+    if v in ("0", "false", "no", "off"):
+        return False
+    return True
+
+
 def _openai_chat_json(system: str, user: str) -> dict[str, Any] | None:
     api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("LLM_PLANNER_API_KEY")
     if not api_key:
@@ -1077,9 +1091,77 @@ def llm_router_json_to_plan(
     )
 
 
+def try_heuristic_override_plan(raw_prompt: str, file_count: int = 0) -> tuple["Plan", str] | None:
+    """Deterministic green heuristic → Plan when scores show a clear winner."""
+    hw = heuristic_green_workflow_after_llm_noop_two_pass(raw_prompt, file_count=file_count)
+    if hw is None:
+        return None
+    wf, reason, conf, compact = hw
+    synth = _synthetic_llm_from_heuristic(raw_prompt, wf, reason, conf, compact)
+    log_line = f"override_noop->{wf}|{reason}|{compact}"
+    plan = llm_router_json_to_plan(
+        raw_prompt,
+        synth,
+        heuristic_override=True,
+        heuristic_log=log_line,
+    )
+    return plan, "ok_heuristic_override"
+
+
+def try_heuristic_green_override_only_with_detail(
+    raw_prompt: str, file_count: int = 0
+) -> tuple[Plan | None, str]:
+    """
+    Heuristic-only pass (used after rules still return noop in LLM-first mode).
+    """
+    if not llm_router_enabled():
+        return None, "llm_disabled"
+    got = try_heuristic_override_plan(raw_prompt, file_count=file_count)
+    if got is None:
+        return None, "heuristic_no_override"
+    return got[0], got[1]
+
+
+def try_llm_green_first_with_detail(raw_prompt: str, file_count: int = 0) -> tuple[Plan | None, str]:
+    """
+    LLM-first router for green scope only. Returns a Plan when the model picks a
+    green workflow with confidence >= :data:`_LLM_CONFIDENCE_MIN` and guardrails
+    pass. Otherwise ``(None, reason)`` so caller can fall back to rules.
+    """
+    if not llm_router_enabled():
+        return None, "llm_disabled"
+    llm = call_llm_router(raw_prompt, file_count=file_count)
+    if llm is None:
+        return None, "llm_invalid_response"
+
+    guardrail_rejected = False
+    if llm.workflow in GREEN_WORKFLOWS and _heuristic_blocked(raw_prompt):
+        guardrail_rejected = True
+        llm = LLMRouterJSON(
+            workflow="noop",
+            confidence=0.95,
+            language=llm.language or "unknown",
+            entity="unknown",
+            reason="guardrail_rejected_green_for_accounting_oos",
+            extraction_summary="green_blocked_oos",
+        )
+
+    if llm.workflow == "noop" or llm.confidence < _LLM_CONFIDENCE_MIN:
+        if guardrail_rejected:
+            return None, "guardrail_rejected_llm_green"
+        if llm.workflow == "noop":
+            return None, "llm_chose_noop"
+        return None, f"low_confidence:{llm.confidence:.2f}"
+
+    if llm.workflow not in GREEN_WORKFLOWS:
+        return None, "llm_chose_noop"
+
+    return llm_router_json_to_plan(raw_prompt, llm), "ok"
+
+
 def try_llm_plan_after_noop_with_detail(raw_prompt: str, file_count: int = 0) -> tuple[Plan | None, str]:
     """
-    If LLM enabled and rules returned noop, try LLM.
+    If LLM enabled and rules returned noop, try LLM (legacy rules-first pipeline).
     Returns (Plan, \"ok\" | \"ok_heuristic_override\") on success, or (None, reason) for logging / safe fallback.
     """
     if not llm_router_enabled():
@@ -1100,24 +1182,9 @@ def try_llm_plan_after_noop_with_detail(raw_prompt: str, file_count: int = 0) ->
             extraction_summary="green_blocked_oos",
         )
 
-    def _plan_from_heuristic_override() -> tuple[Plan, str] | None:
-        hw = heuristic_green_workflow_after_llm_noop_two_pass(raw_prompt, file_count=file_count)
-        if hw is None:
-            return None
-        wf, reason, conf, compact = hw
-        synth = _synthetic_llm_from_heuristic(raw_prompt, wf, reason, conf, compact)
-        log_line = f"override_noop->{wf}|{reason}|{compact}"
-        plan = llm_router_json_to_plan(
-            raw_prompt,
-            synth,
-            heuristic_override=True,
-            heuristic_log=log_line,
-        )
-        return plan, "ok_heuristic_override"
-
     # Prefer deterministic scores when the model is noop or under-confident.
     if llm.workflow == "noop" or llm.confidence < _LLM_CONFIDENCE_MIN:
-        got = _plan_from_heuristic_override()
+        got = try_heuristic_override_plan(raw_prompt, file_count=file_count)
         if got is not None:
             return got
 
