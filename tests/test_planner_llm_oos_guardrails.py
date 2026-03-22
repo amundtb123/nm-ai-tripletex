@@ -14,6 +14,7 @@ from planner_llm import (
     _non_green_accounting_context,
     _score_green_workflows,
     _standalone_green_request,
+    _travel_or_expense_report_prompt,
     heuristic_green_workflow_after_llm_noop,
     try_llm_plan_after_noop_with_detail,
 )
@@ -73,6 +74,15 @@ class TestOosHeuristicBlocked(unittest.TestCase):
         self.assertFalse(_fixed_price_or_project_booking_prompt(p))
         self.assertFalse(_heuristic_blocked(p))
 
+    def test_norwegian_reiseregning_blocks_green(self) -> None:
+        p = (
+            'Registrer en reiseregning for Ingrid Larsen (ingrid.larsen@example.org) '
+            'for "Kundebesøk Trondheim". Reisen varte 2 dager'
+        )
+        self.assertTrue(_travel_or_expense_report_prompt(p))
+        self.assertTrue(_non_green_accounting_context(p))
+        self.assertTrue(_heuristic_blocked(p))
+
 
 class TestOosScoresAndOverride(unittest.TestCase):
     def test_invoice_context_zeros_heuristic_scores(self) -> None:
@@ -82,6 +92,10 @@ class TestOosScoresAndOverride(unittest.TestCase):
 
     def test_festpreis_prompt_zeros_heuristic_scores(self) -> None:
         p = "Legen Sie einen Festpreis von 100 NOK für das Projekt X für Firma Y fest."
+        self.assertEqual(sum(_score_green_workflows(p).values()), 0.0)
+
+    def test_reiseregning_prompt_zeros_heuristic_scores(self) -> None:
+        p = "Registrer en reiseregning for Ola (ola@test.no) for møte i Bergen."
         self.assertEqual(sum(_score_green_workflows(p).values()), 0.0)
 
     def test_guardrail_rejects_llm_create_customer(self) -> None:

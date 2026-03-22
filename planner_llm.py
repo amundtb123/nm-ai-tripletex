@@ -459,12 +459,29 @@ def _fixed_price_or_project_booking_prompt(raw_prompt: str) -> bool:
     return False
 
 
+def _travel_or_expense_report_prompt(raw_prompt: str) -> bool:
+    """
+    Travel expense / mileage / reiseregning (NO/EN) — not green create_customer.
+    Blocks heuristic email+contact boosts that mis-fire on «registrer reiseregning …».
+    """
+    low = raw_prompt.lower()
+    if re.search(
+        r"\b(reiseregning|reisekost|reisekostnad|reisekostnader|kjørebok|travel\s+expense|"
+        r"kilometersats|km-?\s*sats|utlegg|utleggs|mileage)\b",
+        low,
+    ):
+        return True
+    return False
+
+
 def _non_green_accounting_context(raw_prompt: str) -> bool:
     """Invoice/payment/project/payroll/period-close — green workflows are not in scope (unless standalone)."""
     from planner import _classify_intent
 
     low = raw_prompt.lower()
-    if _fixed_price_or_project_booking_prompt(raw_prompt):
+    if _fixed_price_or_project_booking_prompt(raw_prompt) or _travel_or_expense_report_prompt(
+        raw_prompt
+    ):
         return True
     # Structural OOS (before standalone CRM exemption)
     if re.search(r"\b(prosjekt|projekt|project)\b", low) and re.search(
