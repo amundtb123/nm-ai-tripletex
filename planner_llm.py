@@ -433,13 +433,41 @@ def _strip_leading_attachment_boilerplate(raw_prompt: str) -> str:
     return "\n".join(lines[i:]).strip() or raw_prompt.strip()
 
 
+def _fixed_price_or_project_booking_prompt(raw_prompt: str) -> bool:
+    """
+    Fixed-price / project-pricing asks (DE Festpreis, NO fastpris, EN fixed price) are not in
+    green CRM scope — blocks heuristic + LLM-green so we do not mis-route to create_customer.
+    """
+    low = raw_prompt.lower()
+    if re.search(
+        r"\b(festpreis|fest\s+preis|fastpris|fast\s+pris|festpris|fixed\s+price)\b",
+        low,
+    ):
+        return True
+    # German «Legen Sie … fest» + price / Festpreis context (NM-style project pricing).
+    if re.search(r"\blegen\s+sie\b", low) and re.search(
+        r"\b(festpreis|fest\s+preis|preis|price|nok|kr\b)\b",
+        low,
+    ):
+        return True
+    # Project + explicit pricing / amount (DE Projekt uses «projekt»; NO «prosjekt»).
+    if re.search(r"\b(prosjekt|projekt|project)\b", low) and re.search(
+        r"\b(festpreis|fest\s+preis|fastpris|fast\s+pris|fixed\s+price|von\s+\d)\b",
+        low,
+    ):
+        return True
+    return False
+
+
 def _non_green_accounting_context(raw_prompt: str) -> bool:
     """Invoice/payment/project/payroll/period-close — green workflows are not in scope (unless standalone)."""
     from planner import _classify_intent
 
     low = raw_prompt.lower()
+    if _fixed_price_or_project_booking_prompt(raw_prompt):
+        return True
     # Structural OOS (before standalone CRM exemption)
-    if re.search(r"\b(prosjekt|project)\b", low) and re.search(
+    if re.search(r"\b(prosjekt|projekt|project)\b", low) and re.search(
         r"\b(kunde|customer|client|koble|link|for\s+customer|til\s+kunde|linked)\b",
         low,
     ):

@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 from planner import build_plan
 from planner_llm import (
     LLMRouterJSON,
+    _fixed_price_or_project_booking_prompt,
     _heuristic_blocked,
     _non_green_accounting_context,
     _score_green_workflows,
@@ -58,12 +59,30 @@ class TestOosHeuristicBlocked(unittest.TestCase):
         p = "What is the price on invoice line 3 for customer Acme?"
         self.assertFalse(_standalone_green_request(p))
 
+    def test_german_festpreis_projekt_blocks_green(self) -> None:
+        p = (
+            'Legen Sie einen Festpreis von 473250 NOK für das Projekt "Datensicherheit" '
+            "für Windkraft GmbH (Org.-Nr. 886395582) fest."
+        )
+        self.assertTrue(_fixed_price_or_project_booking_prompt(p))
+        self.assertTrue(_non_green_accounting_context(p))
+        self.assertTrue(_heuristic_blocked(p))
+
+    def test_finn_kunde_not_blocked_by_festpreis_guard(self) -> None:
+        p = "Finn kunden Hansen AS for meg"
+        self.assertFalse(_fixed_price_or_project_booking_prompt(p))
+        self.assertFalse(_heuristic_blocked(p))
+
 
 class TestOosScoresAndOverride(unittest.TestCase):
     def test_invoice_context_zeros_heuristic_scores(self) -> None:
         p = "Invoice dispute: customer Ola says amount is wrong"
         scores = _score_green_workflows(p)
         self.assertEqual(sum(scores.values()), 0.0)
+
+    def test_festpreis_prompt_zeros_heuristic_scores(self) -> None:
+        p = "Legen Sie einen Festpreis von 100 NOK für das Projekt X für Firma Y fest."
+        self.assertEqual(sum(_score_green_workflows(p).values()), 0.0)
 
     def test_guardrail_rejects_llm_create_customer(self) -> None:
         llm = LLMRouterJSON(
