@@ -498,6 +498,13 @@ def _non_green_accounting_context(raw_prompt: str) -> bool:
     ):
         return True
     # Structural OOS (before standalone CRM exemption)
+    # DE/EN: supplier / purchase invoice (incoming bill) — not CRM «find customer».
+    if re.search(
+        r"\b(rechnung|lieferant|lieferanten|eingangsrechnung|einkaufsrechnung|"
+        r"supplier\s+invoice|vendor\s+invoice|purchase\s+invoice|incoming\s+invoice)\b",
+        low,
+    ):
+        return True
     if re.search(r"\b(prosjekt|projekt|project)\b", low) and re.search(
         r"\b(kunde|customer|client|koble|link|for\s+customer|til\s+kunde|linked)\b",
         low,

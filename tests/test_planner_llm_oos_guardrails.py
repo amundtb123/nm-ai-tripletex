@@ -83,6 +83,15 @@ class TestOosHeuristicBlocked(unittest.TestCase):
         self.assertTrue(_non_green_accounting_context(p))
         self.assertTrue(_heuristic_blocked(p))
 
+    def test_german_supplier_invoice_blocked(self) -> None:
+        """Lieferanten-Rechnung: not green CRM; avoids implicit phone→search_customer + 400."""
+        p = (
+            "Wir haben die Rechnung INV-2026-2399 vom Lieferanten Waldstein GmbH "
+            "(Org.-Nr. 859252303) über 5550 NOK einschließlich MwSt."
+        )
+        self.assertTrue(_non_green_accounting_context(p))
+        self.assertTrue(_heuristic_blocked(p))
+
 
 class TestOosScoresAndOverride(unittest.TestCase):
     def test_invoice_context_zeros_heuristic_scores(self) -> None:
@@ -96,6 +105,13 @@ class TestOosScoresAndOverride(unittest.TestCase):
 
     def test_reiseregning_prompt_zeros_heuristic_scores(self) -> None:
         p = "Registrer en reiseregning for Ola (ola@test.no) for møte i Bergen."
+        self.assertEqual(sum(_score_green_workflows(p).values()), 0.0)
+
+    def test_german_supplier_invoice_zeros_heuristic_scores(self) -> None:
+        p = (
+            "Wir haben die Rechnung INV-2026-2399 vom Lieferanten Waldstein GmbH "
+            "(Org.-Nr. 859252303) über 5550 NOK"
+        )
         self.assertEqual(sum(_score_green_workflows(p).values()), 0.0)
 
     def test_guardrail_rejects_llm_create_customer(self) -> None:
