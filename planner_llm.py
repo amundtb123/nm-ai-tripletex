@@ -186,6 +186,7 @@ Search-over-create (hard rules):
 
 Slot extraction (when routing to search_customer or create_customer):
 - Fill customer_name with the company/person name from the prompt. If the text uses Spanish «el cliente / la cliente …» or French «le client …» before the name, put that name in customer_name (stop before «(» or verbs like tiene/hay). Same for «Finn kunden X», «customer: X».
+- If there is still no name but a non-generic business email is present (e.g. kontakt@firma-as.no), set customer_name from the domain segment (firma-as.no → «Firma As» or similar) — never leave customer_name empty for create_customer when any identifiable email domain exists.
 
 Contrast (mapping hints):
 - «Finn kunde Ola Bygg AS med e-post post@ola.no» → search_customer
@@ -224,8 +225,8 @@ def collect_router_signals(raw_prompt: str) -> dict[str, Any]:
 
     mentions_customer = bool(
         re.search(
-            r"\b(customer|customers|client|clients|kunde|kunden|kunder|kundene|firma|company|"
-            r"bedrift|bedrifter|organisasjon|kontakt|kontakter|mottaker|avsender)\b",
+            r"\b(customer|customers|client|clients|cliente|clientes|kunde|kunden|kunder|kundene|"
+            r"firma|company|bedrift|bedrifter|organisasjon|kontakt|kontakter|mottaker|avsender)\b",
             low,
         )
     )
@@ -494,6 +495,23 @@ def _travel_or_expense_report_prompt(raw_prompt: str) -> bool:
     return False
 
 
+def _spanish_portuguese_project_runbook_prompt(raw_prompt: str) -> bool:
+    """
+    ES/PT project lifecycle / execution checklists (NM-style) — not Tripletex CRM «new customer».
+    Heuristic email+phone boosts must not override LLM noop on these.
+    """
+    low = raw_prompt.lower()
+    if re.search(r"\bciclo\s+de\s+vida\b", low) and re.search(r"\bproyecto\b", low):
+        return True
+    if re.search(r"\b(ejecute|ejecutar)\b", low) and re.search(r"\bproyecto\b", low):
+        return True
+    if re.search(r"\bprojeto\b", low) and re.search(
+        r"\b(executar|ciclo\s+de\s+vida)\b", low
+    ):
+        return True
+    return False
+
+
 def _non_green_accounting_context(raw_prompt: str) -> bool:
     """Invoice/payment/project/payroll/period-close — green workflows are not in scope (unless standalone)."""
     from planner import _classify_intent
@@ -502,6 +520,8 @@ def _non_green_accounting_context(raw_prompt: str) -> bool:
     if _fixed_price_or_project_booking_prompt(raw_prompt) or _travel_or_expense_report_prompt(
         raw_prompt
     ):
+        return True
+    if _spanish_portuguese_project_runbook_prompt(raw_prompt):
         return True
     # Structural OOS (before standalone CRM exemption)
     # DE/EN: supplier / purchase invoice (incoming bill) — not CRM «find customer».
@@ -679,12 +699,15 @@ def _score_green_workflows(raw_prompt: str) -> dict[str, float]:
     # Contact blocks strongly suggest create only when not explicitly searching/looking up.
     if (has_em or has_ph) and s["mentions_customer_terms"] and not s["mentions_find_verbs"]:
         scores["create_customer"] += 5.0
+    # Strong boost only for short contact cards or explicit customer wording — long prompts with
+    # email/phone in footers (e.g. ES project runbooks) must not win create_customer on this alone.
     if (
         has_em
         and has_ph
         and not s["mentions_product_terms"]
         and not s["mentions_employee_terms"]
         and not s["mentions_find_verbs"]
+        and (s["mentions_customer_terms"] or len(effective.strip()) < 280)
     ):
         scores["create_customer"] += 5.5
     if (
@@ -965,6 +988,8 @@ def _synthetic_llm_from_heuristic(
     """Build router JSON after heuristic override of model noop."""
     from planner import (
         _extract_customer_name_after_client_cue,
+        _extract_customer_name_fallback_from_email,
+        _extract_email,
         _extract_label_value,
         _extract_product_code,
         _strip_product_metadata,
@@ -987,6 +1012,8 @@ def _synthetic_llm_from_heuristic(
                 customer_name = m.group(1).strip()
         if not customer_name:
             customer_name = _extract_customer_name_after_client_cue(raw_prompt)
+        if not customer_name:
+            customer_name = _extract_customer_name_fallback_from_email(_extract_email(raw_prompt))
 
     if workflow in ("create_product", "search_product"):
         product_name = _extract_label_value(raw_prompt, "produkt", "vare", "product", "article", "linje")
@@ -1032,6 +1059,7 @@ def llm_router_json_to_plan(
         _WORKFLOW_TARGET,
         _classify_intent,
         _extract_customer_name_after_client_cue,
+        _extract_customer_name_fallback_from_email,
         _extract_email,
         _extract_notes,
         _extract_phone,
@@ -1050,6 +1078,8 @@ def llm_router_json_to_plan(
     customer_name = (llm.customer_name or "").strip()
     if wf in ("search_customer", "create_customer") and not customer_name:
         customer_name = _extract_customer_name_after_client_cue(raw_prompt).strip()
+    if wf in ("search_customer", "create_customer") and not customer_name:
+        customer_name = _extract_customer_name_fallback_from_email(email).strip()
     product_name = (llm.product_name or "").strip()
     product_number = (llm.product_number or "").strip()
     if not product_number:

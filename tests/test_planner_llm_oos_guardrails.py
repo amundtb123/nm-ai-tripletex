@@ -92,6 +92,16 @@ class TestOosHeuristicBlocked(unittest.TestCase):
         self.assertTrue(_non_green_accounting_context(p))
         self.assertTrue(_heuristic_blocked(p))
 
+    def test_spanish_project_lifecycle_runbook_blocked(self) -> None:
+        """ES project execution checklist — not CRM create_customer; avoids noop→heuristic 400."""
+        p = (
+            "Ejecute el ciclo de vida completo del proyecto 'Actualización Sistema Sierra' "
+            "(Sierra SL, org. nº 839741642): 1) El proyecto"
+        )
+        self.assertTrue(_non_green_accounting_context(p))
+        self.assertTrue(_heuristic_blocked(p))
+
+
 class TestOosScoresAndOverride(unittest.TestCase):
     def test_invoice_context_zeros_heuristic_scores(self) -> None:
         p = "Invoice dispute: customer Ola says amount is wrong"
@@ -110,6 +120,13 @@ class TestOosScoresAndOverride(unittest.TestCase):
         p = (
             "Wir haben die Rechnung INV-2026-2399 vom Lieferanten Waldstein GmbH "
             "(Org.-Nr. 859252303) über 5550 NOK"
+        )
+        self.assertEqual(sum(_score_green_workflows(p).values()), 0.0)
+
+    def test_spanish_project_runbook_zeros_heuristic_scores(self) -> None:
+        p = (
+            "Ejecute el ciclo de vida completo del proyecto 'Actualización Sistema Sierra' "
+            "(Sierra SL, org. nº 839741642): 1) El proyecto"
         )
         self.assertEqual(sum(_score_green_workflows(p).values()), 0.0)
 
