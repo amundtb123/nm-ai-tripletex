@@ -345,6 +345,54 @@ def _extract_customer_name_after_client_cue(text: str) -> str:
     return ""
 
 
+_GENERIC_CONSUMER_EMAIL_DOMAINS: frozenset[str] = frozenset(
+    {
+        "gmail.com",
+        "googlemail.com",
+        "hotmail.com",
+        "outlook.com",
+        "live.com",
+        "yahoo.com",
+        "ymail.com",
+        "icloud.com",
+        "me.com",
+        "msn.com",
+        "gmx.com",
+        "mail.com",
+        "protonmail.com",
+        "proton.me",
+    }
+)
+
+_MAIL_SUBDOMAIN_PREFIXES: frozenset[str] = frozenset(
+    {"mail", "www", "www2", "kontakt", "post", "info", "sales", "support", "noreply", "no-reply"}
+)
+
+
+def _extract_customer_name_fallback_from_email(email: str) -> str:
+    """If no explicit customer name was parsed, derive a short label from a corporate-style
+    domain (e.g. kontakt@ola-bygg.no → «Ola Bygg»). Returns empty for consumer mail hosts."""
+    if not email or "@" not in email:
+        return ""
+    domain = email.rsplit("@", 1)[-1].strip().lower()
+    domain = domain.split(":", 1)[0]
+    if not domain or "." not in domain:
+        return ""
+    if domain in _GENERIC_CONSUMER_EMAIL_DOMAINS:
+        return ""
+    parts = domain.split(".")
+    if len(parts) < 2:
+        return ""
+    if parts[0] in _MAIL_SUBDOMAIN_PREFIXES and len(parts) >= 3:
+        main = parts[1]
+    else:
+        main = parts[0]
+    main = main.replace("-", " ").replace("_", " ").strip()
+    if len(main) < 2:
+        return ""
+    return " ".join(w.capitalize() for w in main.split())
+
+
 def _strip_email_phone_chunks(text: str) -> str:
     s = _EMAIL_RE.sub(" ", text)
     s = _PHONE_RE.sub(" ", s)
@@ -719,6 +767,11 @@ def build_plan_rules(prompt: str) -> Plan:
         )
         customer_name = _clean_tail(raw_tail)
         name = _extract_label_value(prompt, "navn", "name")
+
+    if wf in ("search_customer", "create_customer", "search_invoice") and not (customer_name or "").strip():
+        fb = _extract_customer_name_fallback_from_email(email)
+        if fb:
+            customer_name = fb
 
     snippet = re.sub(r"\s+", " ", prompt.strip())[:120]
     hints = [
