@@ -498,12 +498,10 @@ def _non_green_accounting_context(raw_prompt: str) -> bool:
     ):
         return True
     # Structural OOS (before standalone CRM exemption)
-    # DE/EN/ES/FR/IT: supplier / purchase invoice (incoming bill) — not CRM «find customer».
+    # DE/EN: supplier / purchase invoice (incoming bill) — not CRM «find customer».
     if re.search(
         r"\b(rechnung|lieferant|lieferanten|eingangsrechnung|einkaufsrechnung|"
-        r"supplier\s+invoice|vendor\s+invoice|purchase\s+invoice|incoming\s+invoice|"
-        r"factura\s+pendiente|cuenta\s+por\s+cobrar|"
-        r"facture\s+(fournisseur|d\s*achat)|fattura\s+fornitore)\b",
+        r"supplier\s+invoice|vendor\s+invoice|purchase\s+invoice|incoming\s+invoice)\b",
         low,
     ):
         return True
@@ -959,7 +957,12 @@ def _synthetic_llm_from_heuristic(
     scores_compact: str,
 ) -> LLMRouterJSON:
     """Build router JSON after heuristic override of model noop."""
-    from planner import _extract_label_value, _extract_product_code, _strip_product_metadata
+    from planner import (
+        _extract_customer_name_after_client_cue,
+        _extract_label_value,
+        _extract_product_code,
+        _strip_product_metadata,
+    )
 
     customer_name = ""
     product_name = ""
@@ -976,6 +979,8 @@ def _synthetic_llm_from_heuristic(
             )
             if m:
                 customer_name = m.group(1).strip()
+        if not customer_name:
+            customer_name = _extract_customer_name_after_client_cue(raw_prompt)
 
     if workflow in ("create_product", "search_product"):
         product_name = _extract_label_value(raw_prompt, "produkt", "vare", "product", "article", "linje")
@@ -1020,6 +1025,7 @@ def llm_router_json_to_plan(
         WorkflowKind,
         _WORKFLOW_TARGET,
         _classify_intent,
+        _extract_customer_name_after_client_cue,
         _extract_email,
         _extract_notes,
         _extract_phone,
@@ -1036,6 +1042,8 @@ def llm_router_json_to_plan(
     notes = _extract_notes(raw_prompt)
 
     customer_name = (llm.customer_name or "").strip()
+    if wf in ("search_customer", "create_customer") and not customer_name:
+        customer_name = _extract_customer_name_after_client_cue(raw_prompt).strip()
     product_name = (llm.product_name or "").strip()
     product_number = (llm.product_number or "").strip()
     if not product_number:

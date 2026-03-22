@@ -244,7 +244,7 @@ def _strip_tail_for_payment_customer(tail: str, invoice_number: str) -> str:
 
 _INTENT_RULES: tuple[tuple[IntentKind, tuple[str, ...]], ...] = (
     ("payment", ("betaling", "payment", "innbetaling", "utbetaling", "betale")),
-    ("invoice", ("faktura", "invoice", "rechnung", "factura", "facture", "fattura")),
+    ("invoice", ("faktura", "invoice", "rechnung")),
     ("delete", ("slett", "delete", "fjern")),
     ("create", ("opprett", "create", "legg til", "ny kunde", "nytt")),
     ("update", ("oppdater", "update", "endre")),
@@ -298,6 +298,36 @@ def _extract_label_value(text: str, *labels: str) -> str:
         m = re.search(rf"(?:{re.escape(lab)})\s*[:=]\s*([^\n,]+)", text, re.IGNORECASE)
         if m:
             return m.group(1).strip()
+    return ""
+
+
+def _extract_customer_name_after_client_cue(text: str) -> str:
+    """
+    Spanish/Portuguese/Italian-style «el cliente Firma SL», French «le client Acme».
+    Stops before «(», or before ES «tiene/tienen/ha/hay» when no parenthesis yet.
+    """
+    if not (text or "").strip():
+        return ""
+    m = re.search(
+        r"\b(?:el|la|los|las)\s+cliente\s+"
+        r"([A-Za-z0-9ÆØÅæøåÅÄÖÆØåäö\s&\.\-']{2,120}?)(?=\s*\(|\s+tiene\b|\s+tienen\b|\s+ha\b|\s+hay\b|\s*$)",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        n = m.group(1).strip()
+        if len(n) >= 2:
+            return n
+    m = re.search(
+        r"\b(?:le|la|les)\s+client\s+"
+        r"([A-Za-z0-9ÆØÅæøåÅÄÖÆØåäö\s&\.\-']{2,120}?)(?=\s*\(|\s+a\s+une|\s+a\s+un|\s+avec\b|\s*$)",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        n = m.group(1).strip()
+        if len(n) >= 2:
+            return n
     return ""
 
 
